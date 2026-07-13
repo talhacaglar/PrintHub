@@ -78,6 +78,14 @@ function migrate() {
         CREATE INDEX IF NOT EXISTS idx_readings_ip_time
             ON printer_readings(printer_ip, captured_at);
 
+        CREATE TABLE IF NOT EXISTS printer_assets (
+            printer_ip TEXT PRIMARY KEY,
+            asset_tag TEXT DEFAULT '',                   -- demirbaş numarası
+            custom_location TEXT DEFAULT '',             -- elle girilen konum (SNMP'yi geçersiz kılar)
+            notes TEXT DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             actor TEXT DEFAULT '',
@@ -113,7 +121,8 @@ function seed() {
         ad_base_dn: '',
         ad_bind_dn: '',
         ad_password: '',            // safeStorage ile şifreli saklanabilir (main.js)
-        ad_share_roots: '[]'        // JSON dizi: taranacak paylaşım kök yolları
+        ad_share_roots: '[]',       // JSON dizi: taranacak paylaşım kök yolları
+        auto_refresh_minutes: '0'   // 0 = otomatik yenileme kapalı
     };
     const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
     for (const [k, v] of Object.entries(defaults)) insert.run(k, v);

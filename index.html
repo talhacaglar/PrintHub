@@ -8,14 +8,15 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
+    <script>
+        // Tema tercihini sayfa çizilmeden uygula (FOUC önleme)
+        try {
+            const t = localStorage.getItem('printhub-theme');
+            if (t === 'light') document.documentElement.dataset.theme = 'light';
+        } catch (e) { /* ok */ }
+    </script>
 </head>
 <body>
-    <!-- Animated background -->
-    <div class="bg-grid"></div>
-    <div class="bg-glow bg-glow-1"></div>
-    <div class="bg-glow bg-glow-2"></div>
-    <div class="bg-glow bg-glow-3"></div>
-
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
@@ -94,6 +95,9 @@
                 </button>
                 <button class="topbar-btn" id="refreshBtn" title="Yenile">
                     <span class="material-icons-round">refresh</span>
+                </button>
+                <button class="topbar-btn" id="themeBtn" title="Tema Değiştir">
+                    <span class="material-icons-round" id="themeIcon">light_mode</span>
                 </button>
                 <button class="topbar-btn notification-btn" id="notificationBtn" title="Bildirimler">
                     <span class="material-icons-round">notifications</span>
@@ -309,6 +313,10 @@
                     <div class="form-group">
                         <label>Para Birimi</label>
                         <input type="text" id="setCurrency" value="TRY" class="form-input" maxlength="4">
+                    </div>
+                    <div class="form-group">
+                        <label>Otomatik Yenileme (dakika, 0 = kapalı)</label>
+                        <input type="number" id="setAutoRefresh" value="0" min="0" max="1440" class="form-input">
                     </div>
                     <button id="saveSettingsBtn" class="scan-btn" style="margin-top: 10px;">
                         <span class="material-icons-round">save</span>

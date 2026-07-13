@@ -11,9 +11,13 @@ Electron + Express + SQLite ile geliştirilmiştir.
 - **Ağ Keşfi** — Belirtilen IP aralığında (`/22`, `/24`) yazıcı portlarını (9100/631/515) tarar, bulunan cihazları SNMP (RFC 3805 / MIB-II / HOST-RESOURCES) ile sorgular.
 - **Yazıcı İzleme** — Toner/mürekkep seviyeleri, kağıt tepsileri, sayfa sayacı, durum ve düşük toner/kağıt bildirimleri.
 - **Toner Maliyeti & Tüketim** — Toner tür bilgisi, birim maliyet, aylık basılan sayfa, yazıcı bazlı tüketim ve tahmini kartuş değişim sayısı (sayaç geçmişinden hesaplanır).
-- **Stok Yönetimi** — Toner türleri, stoğa giriş/çıkış hareketleri, mevcut seviye ve düşük stok uyarıları.
+- **Stok Yönetimi** — Toner türleri, stoğa giriş/çıkış hareketleri, mevcut seviye ve düşük stok uyarıları (bildirim paneline düşer).
 - **Active Directory** — Gerçek LDAP bağlantısı; kullanıcıya tıklandığında grup üyelikleri, ağ klasörü okuma/yazma yetkileri ve kullanılan kaynaklar.
-- **ISO 27001 / Güvenlik** — Rol tabanlı erişim (RBAC), denetim kaydı (audit log), erişim hakları raporu ve kullanıcı yönetimi.
+- **ISO 27001 / Güvenlik** — Rol tabanlı erişim (RBAC), denetim kaydı (audit log, arama/filtre), erişim hakları raporu ve kullanıcı yönetimi.
+- **Açık / Karanlık Tema** — Üst bardaki düğmeyle geçiş; tercih kalıcıdır. Minimalist, sade arayüz.
+- **CSV Dışa Aktarma** — Stok hareketleri, denetim kaydı, maliyet ve tüketim tabloları tek tıkla CSV (Excel uyumlu, UTF-8 BOM).
+- **Varlık Envanteri Alanları** — Yazıcılara demirbaş no, özel konum ve not eklenebilir (ISO A.5.9).
+- **Otomatik Periyodik Yenileme** — Ayarlanan aralıkta yazıcılar arka planda sorgulanır; tüketim zaman serisi otomatik beslenir.
 
 ## ISO/IEC 27001:2022 Kontrol Eşlemesi
 

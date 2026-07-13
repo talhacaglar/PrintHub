@@ -32,9 +32,36 @@ const $$ = (sel) => document.querySelectorAll(sel);
 // INITIALIZE
 // ============================================
 document.addEventListener("DOMContentLoaded", () => {
+    setupTheme();
     setupAuthListeners();
     bootstrap();
 });
+
+// ============================================
+// TEMA (açık/karanlık)
+// ============================================
+function setupTheme() {
+    updateThemeIcon();
+    document.getElementById("themeBtn").addEventListener("click", toggleTheme);
+}
+
+function toggleTheme() {
+    const isLight = document.documentElement.dataset.theme === 'light';
+    if (isLight) {
+        delete document.documentElement.dataset.theme;
+        localStorage.setItem('printhub-theme', 'dark');
+    } else {
+        document.documentElement.dataset.theme = 'light';
+        localStorage.setItem('printhub-theme', 'light');
+    }
+    updateThemeIcon();
+}
+
+function updateThemeIcon() {
+    const isLight = document.documentElement.dataset.theme === 'light';
+    const icon = document.getElementById("themeIcon");
+    if (icon) icon.textContent = isLight ? 'dark_mode' : 'light_mode';
+}
 
 // ============================================
 // AUTH / OTURUM
@@ -285,9 +312,28 @@ function startAutoRefresh() {
 // ============================================
 // NOTIFICATIONS (gerçek verilere göre oluştur)
 // ============================================
-function generateNotifications() {
+async function generateNotifications() {
     notifications = [];
     const now = new Date();
+
+    // Düşük stok uyarıları (stok modülü entegrasyonu)
+    try {
+        const res = await apiFetch(`${API_BASE}/api/stock`);
+        if (res.ok) {
+            const data = await res.json();
+            for (const s of (data.stock || [])) {
+                if (s.low) {
+                    notifications.push({
+                        type: "warning",
+                        icon: "inventory_2",
+                        title: "Düşük Toner Stoğu",
+                        desc: `${s.name} — kalan: ${s.current_stock} (eşik: ${s.min_stock})`,
+                        time: "Şimdi"
+                    });
+                }
+            }
+        }
+    } catch (e) { /* stok servisi yoksa sessiz geç */ }
 
     for (const printer of printers) {
         // Düşük toner uyarısı
@@ -562,7 +608,7 @@ function createPrinterCard(printer, index) {
                 </div>
                 <div class="card-detail">
                     <span class="material-icons-round">location_on</span>
-                    <span>${printer.location || 'Bilinmiyor'}</span>
+                    <span>${printer.customLocation || printer.location || 'Bilinmiyor'}</span>
                 </div>
             </div>
             ${tonerBars ? `
@@ -637,7 +683,7 @@ function openPrinterModal(printerId) {
         if (isColor) {
             const colorMap = { cyan: 'Cyan', magenta: 'Magenta', yellow: 'Yellow', black: 'Black' };
             const colorCss = { cyan: 'var(--toner-cyan)', magenta: 'var(--toner-magenta)', yellow: 'var(--toner-yellow)', black: 'var(--toner-black)' };
-            const bgCss = { black: 'linear-gradient(90deg, #94a3b8, #e2e8f0)' };
+            const bgCss = { black: 'var(--toner-black-bar)' };
 
             for (const [color, label] of Object.entries(colorMap)) {
                 const level = printer.toner[color];
@@ -665,7 +711,7 @@ function openPrinterModal(printerId) {
                         <span class="toner-name" style="color: var(--toner-black)">Black Toner</span>
                         <span class="toner-val" style="color: var(--toner-black)">${display}</span>
                     </div>
-                    <div class="modal-toner-bar"><div class="modal-toner-bar-fill" style="width:${width}%; background: linear-gradient(90deg, #94a3b8, #e2e8f0)"></div></div>
+                    <div class="modal-toner-bar"><div class="modal-toner-bar-fill" style="width:${width}%; background: var(--toner-black-bar)"></div></div>
                 </div>
             `;
         }
@@ -810,6 +856,31 @@ function openPrinterModal(printerId) {
 
         <div class="modal-section">
             <div class="modal-section-title">
+                <span class="material-icons-round">inventory</span>
+                Varlık Bilgileri (ISO A.5.9)
+            </div>
+            ${hasRole('operator') ? `
+            <form id="assetForm" data-ip="${printer.ip}">
+                <div class="modal-info-grid" style="margin-bottom:10px">
+                    <div class="form-group" style="margin:0"><label>Demirbaş No</label>
+                        <input class="form-input" id="asset_tag" value="${escapeHtml(printer.assetTag || '')}" placeholder="ör: DMB-2026-014"></div>
+                    <div class="form-group" style="margin:0"><label>Özel Konum</label>
+                        <input class="form-input" id="asset_location" value="${escapeHtml(printer.customLocation || '')}" placeholder="ör: Kat 2 — Muhasebe"></div>
+                </div>
+                <div class="form-group"><label>Not</label>
+                    <input class="form-input" id="asset_notes" value="${escapeHtml(printer.assetNotes || '')}" placeholder="ör: garanti bitişi, sorumlu kişi"></div>
+                <button type="submit" class="mini-btn primary">Varlık Bilgisini Kaydet</button>
+                <span id="assetMsg" style="font-size:12px;color:var(--status-online);margin-left:8px"></span>
+            </form>` : `
+            <div class="modal-info-grid">
+                <div class="modal-info-item"><span class="material-icons-round">tag</span><div class="info-content"><span class="info-label">Demirbaş No</span><span class="info-value">${escapeHtml(printer.assetTag || '—')}</span></div></div>
+                <div class="modal-info-item"><span class="material-icons-round">place</span><div class="info-content"><span class="info-label">Özel Konum</span><span class="info-value">${escapeHtml(printer.customLocation || '—')}</span></div></div>
+                <div class="modal-info-item" style="grid-column:span 2"><span class="material-icons-round">notes</span><div class="info-content"><span class="info-label">Not</span><span class="info-value">${escapeHtml(printer.assetNotes || '—')}</span></div></div>
+            </div>`}
+        </div>
+
+        <div class="modal-section">
+            <div class="modal-section-title">
                 <span class="material-icons-round">trending_up</span>
                 Toner Tüketim Geçmişi
             </div>
@@ -830,6 +901,32 @@ function openPrinterModal(printerId) {
     modal.classList.add("show");
     document.body.style.overflow = "hidden";
     loadPrinterHistory(printer.ip);
+
+    // Varlık formu (operator+)
+    const assetForm = document.getElementById("assetForm");
+    if (assetForm) {
+        assetForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const ip = assetForm.dataset.ip;
+            const body = {
+                asset_tag: document.getElementById("asset_tag").value.trim(),
+                custom_location: document.getElementById("asset_location").value.trim(),
+                notes: document.getElementById("asset_notes").value.trim()
+            };
+            const res = await apiFetch(`${API_BASE}/api/printer/${encodeURIComponent(ip)}/asset`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            });
+            const msg = document.getElementById("assetMsg");
+            msg.textContent = res.ok ? "Kaydedildi ✓" : "Hata!";
+            if (res.ok) {
+                // Yerel listeyi güncelle (kart görünümü için)
+                const p = printers.find(x => x.ip === ip);
+                if (p) { p.assetTag = body.asset_tag; p.customLocation = body.custom_location; p.assetNotes = body.notes; }
+                renderPrinters();
+            }
+            setTimeout(() => { msg.textContent = ""; }, 2000);
+        });
+    }
 }
 
 // Yazıcı okuma geçmişini modalde göster (sayfa sayacı değişimi + toner)
@@ -1000,6 +1097,7 @@ async function loadSettings() {
         set("setBaseIp", s.scan_base_ip);
         set("setCidr", s.scan_cidr);
         set("setCurrency", s.currency);
+        set("setAutoRefresh", s.auto_refresh_minutes);
         set("setAdUrl", s.ad_url);
         set("setAdBaseDn", s.ad_base_dn);
         set("setAdBindDn", s.ad_bind_dn);
@@ -1015,7 +1113,8 @@ async function saveGeneralSettings() {
     const body = {
         scan_base_ip: document.getElementById("setBaseIp").value.trim(),
         scan_cidr: document.getElementById("setCidr").value,
-        currency: document.getElementById("setCurrency").value.trim() || 'TRY'
+        currency: document.getElementById("setCurrency").value.trim() || 'TRY',
+        auto_refresh_minutes: document.getElementById("setAutoRefresh").value || '0'
     };
     const res = await apiFetch(`${API_BASE}/api/settings`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -1167,7 +1266,7 @@ function renderReports() {
                 </div>
             </div>
             <div class="stat-card">
-                <div class="stat-icon-wrap" style="color:var(--status-error); background:rgba(239, 68, 68, 0.1)"><span class="material-icons-round">opacity</span></div>
+                <div class="stat-icon-wrap" style="color:var(--status-error); background:var(--status-error-bg)"><span class="material-icons-round">opacity</span></div>
                 <div class="stat-info">
                     <span class="stat-value" style="color:var(--status-error)">${lowTonerCount}</span>
                     <span class="stat-label">Azalan/Biten Toner Sayısı</span>
@@ -1195,6 +1294,33 @@ function escapeHtml(s) {
 const COLOR_LABEL = { black: 'Siyah', cyan: 'Cyan', magenta: 'Magenta', yellow: 'Sarı' };
 
 // ============================================
+// CSV DIŞA AKTARMA
+// Render sırasında veri kaydedilir, düğme indirir.
+// UTF-8 BOM → Excel'de Türkçe karakter uyumu.
+// ============================================
+const csvData = {}; // key -> { filename, headers, rows }
+
+function registerCSV(key, filename, headers, rows) {
+    csvData[key] = { filename, headers, rows };
+}
+
+function downloadCSV(key) {
+    const d = csvData[key];
+    if (!d) return;
+    const esc = (v) => {
+        const s = String(v ?? '');
+        return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const lines = [d.headers.map(esc).join(';'), ...d.rows.map(r => r.map(esc).join(';'))];
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = d.filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+// ============================================
 // STOK YÖNETİMİ
 // ============================================
 async function renderStock() {
@@ -1217,6 +1343,12 @@ async function renderStock() {
 
     const canWrite = hasRole('operator');
     const lowCount = stock.filter(s => s.low).length;
+
+    // CSV dışa aktarma verisi (ISO 27001 kayıt kanıtı)
+    registerCSV('stock', 'stok-hareketleri.csv',
+        ['Tarih', 'Toner', 'Renk', 'Yön', 'Adet', 'Birim Maliyet', 'Yazıcı', 'Kullanıcı', 'Not'],
+        movements.map(m => [m.created_at, m.toner_name, COLOR_LABEL[m.color] || m.color,
+            m.direction === 'in' ? 'Giriş' : 'Çıkış', m.quantity, m.unit_cost, m.printer_ip || '', m.actor || '', m.note || '']));
 
     const stockRows = stock.length ? stock.map(s => `
         <tr>
@@ -1245,7 +1377,7 @@ async function renderStock() {
             <div class="stats-grid" style="padding:0; margin-bottom:20px;">
                 <div class="stat-card"><div class="stat-icon-wrap"><span class="material-icons-round">inventory_2</span></div><div class="stat-info"><span class="stat-value">${stock.length}</span><span class="stat-label">Toner Türü</span></div></div>
                 <div class="stat-card"><div class="stat-icon-wrap"><span class="material-icons-round">tag</span></div><div class="stat-info"><span class="stat-value">${stock.reduce((a, s) => a + s.current_stock, 0)}</span><span class="stat-label">Toplam Stok Adedi</span></div></div>
-                <div class="stat-card"><div class="stat-icon-wrap" style="color:var(--status-error);background:rgba(239,68,68,.1)"><span class="material-icons-round">warning</span></div><div class="stat-info"><span class="stat-value" style="color:${lowCount ? 'var(--status-error)' : ''}">${lowCount}</span><span class="stat-label">Düşük Stok</span></div></div>
+                <div class="stat-card"><div class="stat-icon-wrap" style="color:var(--status-error);background:var(--status-error-bg)"><span class="material-icons-round">warning</span></div><div class="stat-info"><span class="stat-value" style="color:${lowCount ? 'var(--status-error)' : ''}">${lowCount}</span><span class="stat-label">Düşük Stok</span></div></div>
             </div>
 
             <div class="settings-card" style="margin-bottom:20px;">
@@ -1262,7 +1394,10 @@ async function renderStock() {
             </div>
 
             <div class="settings-card">
-                <h3 style="margin:0 0 14px">Son Stok Hareketleri</h3>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                    <h3 style="margin:0">Son Stok Hareketleri</h3>
+                    <button class="mini-btn" onclick="downloadCSV('stock')">⬇ CSV İndir</button>
+                </div>
                 <div class="table-container">
                     <table class="data-table">
                         <thead><tr><th>Tarih</th><th>Toner</th><th>Yön</th><th>Adet</th><th>Yazıcı</th><th>Kullanıcı</th><th>Not</th></tr></thead>
@@ -1367,6 +1502,15 @@ async function renderCost() {
     const totalOut = (cost.byType || []).reduce((a, t) => a + (t.out_value || 0), 0);
     const totalIn = (cost.byType || []).reduce((a, t) => a + (t.in_value || 0), 0);
 
+    // CSV dışa aktarma verileri
+    registerCSV('usage', 'yazici-tuketim.csv',
+        ['Yazıcı', 'IP', 'Bu Ay (sayfa)', 'Toplam Sayaç', 'Toner Değişimleri', 'Okuma Sayısı'],
+        (usage.byPrinter || []).map(p => [p.name, p.ip, p.monthlyPages, p.currentTotal,
+            Object.entries(p.replacements || {}).map(([c, n]) => `${COLOR_LABEL[c] || c}:${n}`).join(' '), p.readings]));
+    registerCSV('cost', 'toner-maliyet.csv',
+        ['Toner', 'Renk', 'Giriş Adet', 'Çıkış Adet', 'Birim Maliyet', 'Tüketim Değeri', 'Para Birimi'],
+        (cost.byType || []).map(t => [t.name, COLOR_LABEL[t.color] || t.color, t.in_qty, t.out_qty, t.unit_cost, t.out_value, cur]));
+
     // Aylık tüketim mini bar chart (CSS)
     const maxPages = Math.max(1, ...(usage.monthlyTotals || []).map(m => m.pages));
     const monthBars = (usage.monthlyTotals || []).length ? (usage.monthlyTotals || []).map(m => `
@@ -1402,14 +1546,20 @@ async function renderCost() {
             </div>
 
             <div class="settings-card" style="margin-bottom:20px;">
-                <h3 style="margin:0 0 14px">Yazıcı Bazlı Tüketim</h3>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                    <h3 style="margin:0">Yazıcı Bazlı Tüketim</h3>
+                    <button class="mini-btn" onclick="downloadCSV('usage')">⬇ CSV İndir</button>
+                </div>
                 <div class="table-container"><table class="data-table">
                     <thead><tr><th>Yazıcı</th><th>Bu Ay (sayfa)</th><th>Toplam Sayaç</th><th>Toner Değişimleri</th></tr></thead>
                     <tbody>${usageRows}</tbody></table></div>
             </div>
 
             <div class="settings-card">
-                <h3 style="margin:0 0 14px">Toner Türü Bazlı Maliyet</h3>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                    <h3 style="margin:0">Toner Türü Bazlı Maliyet</h3>
+                    <button class="mini-btn" onclick="downloadCSV('cost')">⬇ CSV İndir</button>
+                </div>
                 <div class="table-container"><table class="data-table">
                     <thead><tr><th>Toner</th><th>Renk</th><th>Giriş</th><th>Çıkış</th><th>Birim</th><th>Tüketim Değeri</th></tr></thead>
                     <tbody>${costRows}</tbody></table></div>
@@ -1568,8 +1718,15 @@ async function renderSecurity() {
             <td>${u.id !== session.id ? `<button class="mini-btn danger" onclick="deleteUser(${u.id},'${escapeHtml(u.username)}')">Sil</button>` : '<span style="color:var(--text-muted);font-size:11px">(siz)</span>'}</td>
         </tr>`).join('');
 
+    // CSV dışa aktarma (denetim kanıtı)
+    registerCSV('audit', 'denetim-kaydi.csv',
+        ['Zaman', 'Aktör', 'Eylem', 'Nesne', 'Nesne ID', 'Detay', 'IP'],
+        auditRows.map(a => [a.created_at, a.actor || '', a.action, a.entity || '', a.entity_id || '', a.detail || '', a.ip || '']));
+
+    const auditActions = [...new Set(auditRows.map(a => a.action))].sort();
     const auditHtml = auditRows.map(a => `
-        <tr>
+        <tr class="audit-row" data-action="${escapeHtml(a.action)}"
+            data-text="${escapeHtml([a.created_at, a.actor, a.action, a.entity, a.entity_id, a.detail].join(' ').toLowerCase())}">
             <td style="font-size:11px;white-space:nowrap">${escapeHtml(a.created_at)}</td>
             <td>${escapeHtml(a.actor || '-')}</td>
             <td><span class="action-badge">${escapeHtml(a.action)}</span></td>
@@ -1605,13 +1762,34 @@ async function renderSecurity() {
             </div>
 
             <div class="settings-card">
-                <h3 style="margin:0 0 14px">Denetim Kaydı (Audit Log) — son ${auditRows.length}</h3>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+                    <h3 style="margin:0">Denetim Kaydı (Audit Log) — son ${auditRows.length}</h3>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input type="text" class="form-input" id="auditSearch" placeholder="Ara..." style="max-width:180px;padding:8px 12px" oninput="filterAudit()">
+                        <select class="form-input" id="auditAction" style="max-width:150px;padding:8px 12px" onchange="filterAudit()">
+                            <option value="">Tüm eylemler</option>
+                            ${auditActions.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('')}
+                        </select>
+                        <button class="mini-btn" onclick="downloadCSV('audit')">⬇ CSV</button>
+                    </div>
+                </div>
                 <div class="table-container" style="max-height:420px;overflow:auto"><table class="data-table">
                     <thead><tr><th>Zaman</th><th>Aktör</th><th>Eylem</th><th>Nesne</th><th>Detay</th></tr></thead>
-                    <tbody>${auditHtml}</tbody></table></div>
+                    <tbody id="auditTbody">${auditHtml}</tbody></table></div>
             </div>
         </div>
     `;
+}
+
+// Denetim kaydı istemci tarafı filtre (arama + eylem türü)
+function filterAudit() {
+    const q = (document.getElementById("auditSearch")?.value || '').toLowerCase();
+    const action = document.getElementById("auditAction")?.value || '';
+    document.querySelectorAll("#auditTbody .audit-row").forEach(row => {
+        const hitText = !q || (row.dataset.text || '').includes(q);
+        const hitAction = !action || row.dataset.action === action;
+        row.style.display = (hitText && hitAction) ? '' : 'none';
+    });
 }
 
 function openUserForm() {

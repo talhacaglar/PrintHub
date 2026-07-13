@@ -42,8 +42,33 @@ app.use('/api', requireAuth);
 // ============================================
 app.get('/api/status', (req, res) => res.json(scanStatus));
 
+// Varlık kayıtlarını (demirbaş no, özel konum, not) yazıcı listesine ekler (ISO A.5.9)
+function mergeAssets(printers) {
+    const assets = db.prepare('SELECT * FROM printer_assets').all();
+    const byIp = Object.fromEntries(assets.map(a => [a.printer_ip, a]));
+    return printers.map(p => {
+        const a = byIp[p.ip];
+        return a ? { ...p, assetTag: a.asset_tag, customLocation: a.custom_location, assetNotes: a.notes } : p;
+    });
+}
+
 app.get('/api/printers', (req, res) => {
-    res.json({ printers: discoveredPrinters, scanStatus });
+    res.json({ printers: mergeAssets(discoveredPrinters), scanStatus });
+});
+
+app.put('/api/printer/:ip/asset', requireRole('operator'), (req, res) => {
+    const ip = req.params.ip;
+    const { asset_tag, custom_location, notes } = req.body || {};
+    db.prepare(`INSERT INTO printer_assets (printer_ip, asset_tag, custom_location, notes, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(printer_ip) DO UPDATE SET
+                    asset_tag = excluded.asset_tag,
+                    custom_location = excluded.custom_location,
+                    notes = excluded.notes,
+                    updated_at = excluded.updated_at`)
+        .run(ip, asset_tag || '', custom_location || '', notes || '');
+    audit({ actor: currentUser(req).username, action: 'update', entity: 'printer_asset', entity_id: ip, detail: asset_tag || '', ip: clientIp(req) });
+    res.json({ ok: true });
 });
 
 app.get('/api/printer/:ip', async (req, res) => {
@@ -134,13 +159,10 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
     }
 });
 
-app.post('/api/refresh', requireRole('operator'), async (req, res) => {
-    if (scanStatus.scanning) return res.status(409).json({ error: 'Tarama devam ediyor.' });
-    if (discoveredPrinters.length === 0) return res.json({ message: 'Yenilenecek yazıcı yok. Önce tarama yapın.' });
-
+// Tüm bilinen yazıcıları yeniden sorgular (manuel yenileme + otomatik zamanlayıcı ortak yolu)
+async function refreshAllPrinters() {
     scanStatus.scanning = true;
     scanStatus.message = 'Yazıcılar yenileniyor...';
-    res.json({ message: 'Yenileme başlatıldı.' });
 
     for (let i = 0; i < discoveredPrinters.length; i++) {
         const printer = discoveredPrinters[i];
@@ -156,10 +178,42 @@ app.post('/api/refresh', requireRole('operator'), async (req, res) => {
         }
     }
 
-    readings.recordAll(discoveredPrinters);
+    readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi
     scanStatus.scanning = false;
     scanStatus.message = 'Yenileme tamamlandı.';
+}
+
+app.post('/api/refresh', requireRole('operator'), async (req, res) => {
+    if (scanStatus.scanning) return res.status(409).json({ error: 'Tarama devam ediyor.' });
+    if (discoveredPrinters.length === 0) return res.json({ message: 'Yenilenecek yazıcı yok. Önce tarama yapın.' });
+
+    res.json({ message: 'Yenileme başlatıldı.' });
+    await refreshAllPrinters();
 });
+
+// ============================================
+// OTOMATİK PERİYODİK YENİLEME
+// auto_refresh_minutes ayarı > 0 ise bilinen yazıcılar periyodik sorgulanır
+// (tüketim raporu için printer_readings zaman serisini besler).
+// ============================================
+let autoRefreshTimer = null;
+
+function scheduleAutoRefresh() {
+    if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+    }
+    const minutes = parseInt(getSetting('auto_refresh_minutes')) || 0;
+    if (minutes <= 0) return;
+
+    autoRefreshTimer = setInterval(async () => {
+        if (scanStatus.scanning || discoveredPrinters.length === 0) return;
+        console.log(`[Oto-Yenileme] ${discoveredPrinters.length} yazıcı sorgulanıyor...`);
+        try { await refreshAllPrinters(); } catch (e) { scanStatus.scanning = false; }
+    }, minutes * 60 * 1000);
+    console.log(`[Oto-Yenileme] Etkin: her ${minutes} dakikada bir.`);
+}
+scheduleAutoRefresh();
 
 // ============================================
 // TONER TÜRLERİ & MALİYET
@@ -322,7 +376,7 @@ app.get('/api/ad/user/:sam', async (req, res) => {
 // ============================================
 // AYARLAR & DENETİM LOGU
 // ============================================
-const SETTING_KEYS = ['currency', 'scan_base_ip', 'scan_cidr', 'ad_url', 'ad_base_dn', 'ad_bind_dn', 'ad_password', 'ad_share_roots'];
+const SETTING_KEYS = ['currency', 'scan_base_ip', 'scan_cidr', 'ad_url', 'ad_base_dn', 'ad_bind_dn', 'ad_password', 'ad_share_roots', 'auto_refresh_minutes'];
 
 app.get('/api/settings', (req, res) => {
     const all = getAllSettings();
@@ -342,6 +396,7 @@ app.post('/api/settings', requireRole('admin'), (req, res) => {
         }
     }
     audit({ actor: currentUser(req).username, action: 'update', entity: 'settings', detail: changed.join(','), ip: clientIp(req) });
+    if (changed.includes('auto_refresh_minutes')) scheduleAutoRefresh();
     res.json({ ok: true, changed });
 });
 
