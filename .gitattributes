@@ -1,0 +1,12 @@
+# Satır sonlarını normalize et
+* text=auto eol=lf
+
+# Windows betikleri CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# İkili dosyalar
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary

@@ -1,0 +1,28 @@
+# Bağımlılıklar
+node_modules/
+
+# Electron derleme çıktıları
+dist/
+out/
+build/Release/
+
+# Yerel veritabanı (kullanıcı verisi — repoya girmemeli)
+*.db
+*.db-wal
+*.db-shm
+printhub.db*
+
+# Loglar
+*.log
+npm-debug.log*
+
+# Ortam & gizli bilgiler
+.env
+.env.*
+
+# Editör / işletim sistemi
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

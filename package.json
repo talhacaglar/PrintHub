@@ -1,0 +1,42 @@
+{
+  "name": "noble-turing",
+  "version": "1.0.0",
+  "description": "Ağ yazıcılarını SNMP ile keşfeden; toner maliyeti, stok yönetimi, Active Directory erişim görünümü ve ISO 27001 uyumlu denetim özellikleri sunan Electron masaüstü uygulaması.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "postinstall": "electron-rebuild -f -w better-sqlite3 || true",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.printhub.app",
+    "productName": "PrintHub",
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.11.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "ldapts": "^9.0.0",
+    "net-snmp": "^3.26.3"
+  }
+}
