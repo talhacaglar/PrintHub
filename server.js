@@ -148,6 +148,7 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
         }
 
         readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi kaydı
+        saveKnownPrinters();                    // yeniden açılışta hatırlanır
 
         scanStatus = {
             scanning: false, progress: 100, total: scanStatus.total,
@@ -158,6 +159,43 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
         scanStatus = { scanning: false, progress: 0, total: 0, scanned: 0, found: 0, message: `Tarama hatası: ${e.message}` };
     }
 });
+
+// ============================================
+// YAZICI KALICILIĞI
+// Keşfedilen yazıcılar DB'de saklanır; uygulama yeniden açıldığında
+// tarama beklemeden bilinen IP'ler otomatik sorgulanır.
+// ============================================
+function saveKnownPrinters() {
+    const tx = db.transaction(() => {
+        db.prepare('DELETE FROM known_printers').run();
+        const ins = db.prepare(`INSERT INTO known_printers (printer_ip, name, model, open_ports, last_seen)
+                                VALUES (?, ?, ?, ?, datetime('now'))`);
+        for (const p of discoveredPrinters) {
+            ins.run(p.ip, p.name || '', p.model || '', JSON.stringify(p.openPorts || []));
+        }
+    });
+    tx();
+}
+
+function loadKnownPrinters() {
+    const rows = db.prepare('SELECT * FROM known_printers ORDER BY printer_ip').all();
+    return rows.map((r, i) => ({
+        id: i + 1,
+        ip: r.printer_ip,
+        name: r.name || `Yazıcı (${r.printer_ip})`,
+        model: r.model || '',
+        type: 'laser', color: false, mac: '',
+        location: 'Bilinmiyor',
+        status: 'offline', statusText: 'Sorgulanıyor...',
+        serialNumber: '', firmware: '',
+        toner: { black: -1 }, paperTrays: [], queue: [],
+        totalPrinted: 0, monthlyPrinted: 0,
+        lastSeen: r.last_seen, snmpAvailable: false,
+        openPorts: safeJson(r.open_ports)
+    }));
+}
+
+function safeJson(s) { try { return JSON.parse(s) || []; } catch { return []; } }
 
 // Tüm bilinen yazıcıları yeniden sorgular (manuel yenileme + otomatik zamanlayıcı ortak yolu)
 async function refreshAllPrinters() {
@@ -179,6 +217,7 @@ async function refreshAllPrinters() {
     }
 
     readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi
+    saveKnownPrinters();
     scanStatus.scanning = false;
     scanStatus.message = 'Yenileme tamamlandı.';
 }
@@ -214,6 +253,18 @@ function scheduleAutoRefresh() {
     console.log(`[Oto-Yenileme] Etkin: her ${minutes} dakikada bir.`);
 }
 scheduleAutoRefresh();
+
+// Açılışta son bilinen yazıcıları yükle ve arka planda tazele —
+// böylece uygulama kapalı kalınan süredeki sayfa sayacı farkı
+// kimse "Ağı Tara"ya basmadan otomatik yakalanır.
+discoveredPrinters = loadKnownPrinters();
+if (discoveredPrinters.length > 0) {
+    scanStatus.message = `${discoveredPrinters.length} kayıtlı yazıcı yüklendi, güncelleniyor...`;
+    console.log(`[Açılış] ${discoveredPrinters.length} kayıtlı yazıcı yüklendi; arka planda sorgulanıyor.`);
+    setTimeout(() => {
+        refreshAllPrinters().catch(() => { scanStatus.scanning = false; });
+    }, 2000);
+}
 
 // ============================================
 // TONER TÜRLERİ & MALİYET
@@ -284,7 +335,7 @@ app.get('/api/stock/movements', (req, res) => {
 });
 
 app.post('/api/stock/movements', requireRole('operator'), (req, res) => {
-    const { toner_type_id, direction, quantity, unit_cost, printer_ip, note } = req.body || {};
+    const { toner_type_id, direction, quantity, unit_cost, printer_ip, note, movement_date } = req.body || {};
     const qty = parseInt(quantity);
     if (!toner_type_id || !['in', 'out'].includes(direction) || !qty || qty <= 0) {
         return res.status(400).json({ error: 'Geçersiz stok hareketi.' });
@@ -292,12 +343,17 @@ app.post('/api/stock/movements', requireRole('operator'), (req, res) => {
     const type = db.prepare('SELECT * FROM toner_types WHERE id = ?').get(toner_type_id);
     if (!type) return res.status(404).json({ error: 'Toner türü bulunamadı.' });
 
+    // Gerçek işlem tarihi — geriye dönük giriş için (YYYY-MM-DD); geçersizse bugün
+    const mDate = (typeof movement_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(movement_date))
+        ? movement_date
+        : new Date().toISOString().slice(0, 10);
+
     const actor = currentUser(req).username;
-    const info = db.prepare(`INSERT INTO stock_movements (toner_type_id, direction, quantity, unit_cost, printer_ip, note, actor)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    const info = db.prepare(`INSERT INTO stock_movements (toner_type_id, direction, quantity, unit_cost, printer_ip, note, actor, movement_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
         toner_type_id, direction, qty,
         unit_cost != null ? parseFloat(unit_cost) : type.unit_cost,
-        printer_ip || null, note || '', actor);
+        printer_ip || null, note || '', actor, mDate);
     audit({ actor, action: direction === 'in' ? 'stock_in' : 'stock_out', entity: 'stock', entity_id: info.lastInsertRowid, detail: `${type.name} x${qty}`, ip: clientIp(req) });
     res.json({ id: info.lastInsertRowid });
 });
@@ -321,7 +377,7 @@ app.get('/api/reports/cost', (req, res) => {
     `).all();
 
     const monthly = db.prepare(`
-        SELECT strftime('%Y-%m', created_at) AS month,
+        SELECT strftime('%Y-%m', COALESCE(movement_date, created_at)) AS month,
             SUM(CASE WHEN direction='out' THEN quantity ELSE 0 END) AS out_qty,
             SUM(CASE WHEN direction='out' THEN quantity*unit_cost ELSE 0 END) AS out_value
         FROM stock_movements GROUP BY month ORDER BY month

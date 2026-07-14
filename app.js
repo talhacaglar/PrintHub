@@ -1346,8 +1346,8 @@ async function renderStock() {
 
     // CSV dışa aktarma verisi (ISO 27001 kayıt kanıtı)
     registerCSV('stock', 'stok-hareketleri.csv',
-        ['Tarih', 'Toner', 'Renk', 'Yön', 'Adet', 'Birim Maliyet', 'Yazıcı', 'Kullanıcı', 'Not'],
-        movements.map(m => [m.created_at, m.toner_name, COLOR_LABEL[m.color] || m.color,
+        ['İşlem Tarihi', 'Kayıt Zamanı', 'Toner', 'Renk', 'Yön', 'Adet', 'Birim Maliyet', 'Yazıcı', 'Kullanıcı', 'Not'],
+        movements.map(m => [m.movement_date || '', m.created_at, m.toner_name, COLOR_LABEL[m.color] || m.color,
             m.direction === 'in' ? 'Giriş' : 'Çıkış', m.quantity, m.unit_cost, m.printer_ip || '', m.actor || '', m.note || '']));
 
     const stockRows = stock.length ? stock.map(s => `
@@ -1363,7 +1363,7 @@ async function renderStock() {
 
     const moveRows = movements.length ? movements.slice(0, 50).map(m => `
         <tr>
-            <td>${escapeHtml(m.created_at)}</td>
+            <td>${escapeHtml(m.movement_date || m.created_at)}</td>
             <td>${escapeHtml(m.toner_name)}</td>
             <td><span class="dir-badge ${m.direction}">${m.direction === 'in' ? '↓ Giriş' : '↑ Çıkış'}</span></td>
             <td>${m.quantity}</td>
@@ -1456,6 +1456,7 @@ function openMovementForm(tonerId, tonerName) {
                 <select class="form-input" id="mv_dir"><option value="in">Giriş (stoğa ekle)</option><option value="out">Çıkış (yazıcıya ver / kullan)</option></select>
             </div>
             <div class="form-group"><label>Adet</label><input class="form-input" id="mv_qty" type="number" min="1" value="1" required></div>
+            <div class="form-group"><label>İşlem Tarihi</label><input class="form-input" id="mv_date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
             <div class="form-group"><label>Birim Maliyet (opsiyonel)</label><input class="form-input" id="mv_cost" type="number" step="0.01" placeholder="varsayılan tür maliyeti"></div>
             <div class="form-group"><label>Yazıcı (çıkış için)</label><select class="form-input" id="mv_printer"><option value="">— Seçilmedi —</option>${printerOpts}</select></div>
             <div class="form-group"><label>Not</label><input class="form-input" id="mv_note" placeholder="ör: fatura no, tedarikçi"></div>
@@ -1469,6 +1470,7 @@ function openMovementForm(tonerId, tonerName) {
             toner_type_id: tonerId,
             direction: document.getElementById("mv_dir").value,
             quantity: document.getElementById("mv_qty").value,
+            movement_date: document.getElementById("mv_date").value,
             unit_cost: document.getElementById("mv_cost").value || null,
             printer_ip: document.getElementById("mv_printer").value || null,
             note: document.getElementById("mv_note").value.trim()

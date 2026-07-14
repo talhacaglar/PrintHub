@@ -63,6 +63,7 @@ function migrate() {
             printer_ip TEXT,                             -- çıkış bir yazıcıya yapıldıysa
             note TEXT DEFAULT '',
             actor TEXT DEFAULT '',                       -- işlemi yapan kullanıcı
+            movement_date TEXT,                          -- gerçek işlem tarihi (geriye dönük giriş için)
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -77,6 +78,14 @@ function migrate() {
         );
         CREATE INDEX IF NOT EXISTS idx_readings_ip_time
             ON printer_readings(printer_ip, captured_at);
+
+        CREATE TABLE IF NOT EXISTS known_printers (
+            printer_ip TEXT PRIMARY KEY,
+            name TEXT DEFAULT '',
+            model TEXT DEFAULT '',
+            open_ports TEXT DEFAULT '[]',
+            last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+        );
 
         CREATE TABLE IF NOT EXISTS printer_assets (
             printer_ip TEXT PRIMARY KEY,
@@ -100,6 +109,9 @@ function migrate() {
     `);
 }
 migrate();
+
+// Var olan kurulumlara sonradan eklenen kolonlar (idempotent)
+try { db.exec("ALTER TABLE stock_movements ADD COLUMN movement_date TEXT"); } catch (e) { /* kolon zaten var */ }
 
 // ============================================
 // SEED — ilk çalıştırmada varsayılan admin + ayarlar
