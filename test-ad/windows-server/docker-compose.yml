@@ -1,0 +1,46 @@
+# ============================================
+# Windows Server 2025 (deneme sürümü) — Active Directory Domain Controller
+# Docker konteynerin içinde QEMU/KVM ile GERÇEK bir Windows VM'i çalıştırır.
+#
+# Amaç:
+#   1. Active Directory'yi gerçek yönetim arayüzüyle (ADUC) öğrenmek
+#   2. Paylaşılan klasör + NTFS izinleri kurmak
+#   3. PrintHub'ı Windows'ta çalıştırıp klasör yetkisi (Get-Acl) özelliğini test etmek
+#
+# Başlat : docker compose -f test-ad/windows-server/docker-compose.yml up -d
+# İzle   : http://localhost:8007   (kurulumu tarayıcıdan canlı izlersiniz)
+# Durdur : docker compose -f test-ad/windows-server/docker-compose.yml stop
+# Sil    : docker compose -f test-ad/windows-server/docker-compose.yml down -v
+#
+# NOT: Windows Server 2025 değerlendirme sürümü 180 gün ücretsizdir.
+# İlk açılışta ~7.6 GB indirir, kurulum kendiliğinden yapılır (~20-40 dk).
+#
+# Port 8006/3389, Windows 11 konteyneri (omarchy-windows) tarafından
+# kullanıldığı için burada 8007/3390 seçildi — ikisi yan yana çalışabilir.
+# ============================================
+services:
+  windows-server:
+    image: dockurr/windows
+    container_name: printhub-winsrv
+    environment:
+      VERSION: "2025"          # Windows Server 2025 (deneme sürümü)
+      RAM_SIZE: "8G"
+      CPU_CORES: "4"
+      DISK_SIZE: "64G"
+      USERNAME: "Administrator"
+      PASSWORD: "Printhub2026!"
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "8007:8006"            # Tarayıcıdan ekran → http://localhost:8007
+      - "3390:3389/tcp"        # Uzak Masaüstü (RDP)
+      - "3390:3389/udp"
+      - "127.0.0.1:1389:389"   # VM'deki AD'nin LDAP portu (host'ta 1389)
+    volumes:
+      - /home/clar/.windows-server:/storage      # VM diski (64 GB'a kadar büyür)
+      - /home/clar/WindowsServer:/shared         # VM içinde: \\host.lan\Data
+    restart: "no"
+    stop_grace_period: 2m

@@ -3,15 +3,19 @@ const cors = require('cors');
 const { scanNetwork, getSubnetsForCIDR } = require('./scanner');
 const { queryPrinter } = require('./snmp-query');
 
-const { db, getSetting, setSetting, getAllSettings, audit } = require('./db');
+const { db, getSetting, setSetting, getAllSettings, setSecureSetting, migratePlaintextSecrets, audit } = require('./db');
 const { sessionMiddleware, requireAuth, requireRole, currentUser, clientIp, attachAuthRoutes } = require('./auth');
 const readings = require('./readings');
 const ad = require('./ad');
+const inventory = require('./inventory');
 
 const app = express();
 const PORT = 3847;
+const HOST = '127.0.0.1'; // Yalnızca yerel makineden erişim — ağa açılmaz
 
-app.use(cors());
+// CORS: yalnızca uygulamanın kendi origin'i (Electron pencere localhost'tan yüklenir).
+// Ağdaki diğer makinelerden gelen cross-origin istekler reddedilir.
+app.use(cors({ origin: [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`], credentials: true }));
 app.use(express.json());
 app.use(sessionMiddleware);
 app.use(express.static(__dirname)); // HTML/CSS/JS dosyalarını sun (login öncesi gerekli)
@@ -19,6 +23,22 @@ app.use(express.static(__dirname)); // HTML/CSS/JS dosyalarını sun (login önc
 // ============================================
 // STATE
 // ============================================
+// SNMP bağlantı seçenekleri: v3 yapılandırılmışsa v3 (auth/priv),
+// aksi halde v2c community (yoksa 'public').
+function snmpCommunity() {
+    if (getSetting('snmp_version') === '3' && getSetting('snmp_v3_user')) {
+        return {
+            version: '3',
+            user: getSetting('snmp_v3_user') || '',
+            authProtocol: getSetting('snmp_v3_auth_protocol') || 'sha',
+            authKey: getSetting('snmp_v3_auth_key') || '',
+            privProtocol: getSetting('snmp_v3_priv_protocol') || 'aes',
+            privKey: getSetting('snmp_v3_priv_key') || ''
+        };
+    }
+    return getSetting('snmp_community') || 'public';
+}
+
 let discoveredPrinters = [];
 let scanStatus = {
     scanning: false,
@@ -36,6 +56,17 @@ attachAuthRoutes(app);
 
 // Bu noktadan sonraki tüm /api uçları oturum ister
 app.use('/api', requireAuth);
+
+// Zorunlu parola değişimi kapısı — kullanıcı ilk parolasını değiştirmeden
+// hiçbir işlem yapamaz (yalnız parola değiştirme / oturum uçları serbest).
+const PW_GATE_ALLOW = ['/change-password', '/logout', '/me'];
+app.use('/api', (req, res, next) => {
+    const user = req.session && req.session.user;
+    if (user && user.mustChangePassword && !PW_GATE_ALLOW.includes(req.path)) {
+        return res.status(403).json({ error: 'Devam etmeden önce parolanızı değiştirmelisiniz.', mustChangePassword: true });
+    }
+    next();
+});
 
 // ============================================
 // YAZICI API'LERİ
@@ -74,7 +105,7 @@ app.put('/api/printer/:ip/asset', requireRole('operator'), (req, res) => {
 app.get('/api/printer/:ip', async (req, res) => {
     const ip = req.params.ip;
     try {
-        const info = await queryPrinter(ip);
+        const info = await queryPrinter(ip, snmpCommunity());
         const idx = discoveredPrinters.findIndex(p => p.ip === ip);
         if (idx >= 0) {
             info.id = discoveredPrinters[idx].id;
@@ -83,13 +114,33 @@ app.get('/api/printer/:ip', async (req, res) => {
         readings.recordReading(info);
         res.json(info);
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        console.error('[API] Yazıcı sorgu hatası:', ip, '-', e.message);
+        res.status(500).json({ error: 'Yazıcı sorgulanamadı (SNMP yanıt vermiyor olabilir).' });
     }
 });
 
 app.get('/api/printer/:ip/history', (req, res) => {
     res.json({ history: readings.getHistory(req.params.ip) });
 });
+
+/**
+ * Diziyi en fazla `limit` eşzamanlılıkla işler (Promise.allSettled benzeri,
+ * sıra korunur). SNMP sorgu paralelleştirmesi için.
+ */
+async function mapConcurrent(items, limit, fn) {
+    const results = new Array(items.length);
+    let next = 0;
+    async function worker() {
+        while (next < items.length) {
+            const i = next++;
+            try { results[i] = await fn(items[i], i); }
+            catch (e) { results[i] = undefined; }
+        }
+    }
+    const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+    await Promise.all(workers);
+    return results.filter(r => r !== undefined);
+}
 
 app.post('/api/scan', requireRole('operator'), async (req, res) => {
     if (scanStatus.scanning) {
@@ -125,27 +176,37 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
         });
 
         scanStatus.message = `${hosts.length} cihaza SNMP sorgusu yapılıyor...`;
-        discoveredPrinters = [];
-        let id = 1;
 
-        for (const host of hosts) {
+        // SNMP sorguları 6'lı gruplar halinde paralel (en büyük hız kazancı)
+        const results = await mapConcurrent(hosts, 6, async (host) => {
+            scanStatus.message = `SNMP sorgulanıyor: ${host.ip}`;
             try {
-                scanStatus.message = `SNMP sorgulanıyor: ${host.ip}`;
-                const info = await queryPrinter(host.ip);
-                info.id = id++;
+                const info = await queryPrinter(host.ip, snmpCommunity());
                 info.openPorts = host.ports;
-                discoveredPrinters.push(info);
+                return info;
             } catch (e) {
-                discoveredPrinters.push({
-                    id: id++, ip: host.ip, name: `Yazıcı (${host.ip})`,
+                return {
+                    ip: host.ip, name: `Yazıcı (${host.ip})`,
                     model: 'SNMP Yanıt Yok', type: 'laser', color: false, mac: '',
-                    location: 'Bilinmiyor', status: 'online', statusText: 'Çevrimiçi',
+                    location: 'Bilinmiyor', status: 'online', statusText: 'Çevrim İçi',
                     serialNumber: '', firmware: '', toner: { black: -1 }, paperTrays: [],
                     queue: [], totalPrinted: 0, monthlyPrinted: 0, lastSeen: 'Şimdi',
                     snmpAvailable: false, openPorts: host.ports
-                });
+                };
             }
-        }
+        });
+
+        // Taramada bulunamayan ama önceden bilinen yazıcılar "çevrimdışı" olarak korunur
+        const foundIps = new Set(results.map(r => r.ip));
+        const offline = discoveredPrinters
+            .filter(p => !foundIps.has(p.ip))
+            .map(p => ({
+                ...p, status: 'offline', statusText: 'Çevrim Dışı',
+                lastSeen: p.lastSeen === 'Şimdi' ? new Date().toISOString() : p.lastSeen,
+                snmpAvailable: false, queue: []
+            }));
+
+        discoveredPrinters = [...results, ...offline].map((p, i) => ({ ...p, id: i + 1 }));
 
         readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi kaydı
         saveKnownPrinters();                    // yeniden açılışta hatırlanır
@@ -198,25 +259,30 @@ function loadKnownPrinters() {
 function safeJson(s) { try { return JSON.parse(s) || []; } catch { return []; } }
 
 // Tüm bilinen yazıcıları yeniden sorgular (manuel yenileme + otomatik zamanlayıcı ortak yolu)
+// SNMP sorguları 6'lı gruplar halinde paralel çalışır.
 async function refreshAllPrinters() {
     scanStatus.scanning = true;
     scanStatus.message = 'Yazıcılar yenileniyor...';
 
-    for (let i = 0; i < discoveredPrinters.length; i++) {
-        const printer = discoveredPrinters[i];
+    let done = 0;
+    await mapConcurrent(discoveredPrinters.map((p, i) => ({ p, i })), 6, async ({ p, i }) => {
         try {
-            const info = await queryPrinter(printer.ip);
-            info.id = printer.id;
-            info.openPorts = printer.openPorts;
+            const info = await queryPrinter(p.ip, snmpCommunity());
+            info.id = p.id;
+            info.openPorts = p.openPorts;
             discoveredPrinters[i] = info;
         } catch (e) {
             discoveredPrinters[i].lastSeen = 'Bağlantı hatası';
             discoveredPrinters[i].status = 'offline';
-            discoveredPrinters[i].statusText = 'Çevrimdışı';
+            discoveredPrinters[i].statusText = 'Çevrim Dışı';
         }
-    }
+        done++;
+        scanStatus.message = `Yenileniyor... ${done}/${discoveredPrinters.length}`;
+        return true;
+    });
 
     readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi
+    readings.pruneReadings(parseInt(getSetting('readings_retention_days')) || 90); // saklama politikası
     saveKnownPrinters();
     scanStatus.scanning = false;
     scanStatus.message = 'Yenileme tamamlandı.';
@@ -399,12 +465,29 @@ app.post('/api/ad/test', requireRole('admin'), async (req, res) => {
     }
 });
 
+// Hata hijyeni: iç detaylar (LDAP DN, dosya yolu vb.) istemciye sızmasın
+function safeError(res, e, publicMsg, status = 400) {
+    console.error('[API]', publicMsg, '-', e.message);
+    res.status(status).json({ error: publicMsg });
+}
+
 app.get('/api/ad/users', async (req, res) => {
     try {
         const users = await ad.getUsers();
         res.json({ users });
     } catch (e) {
-        res.status(400).json({ error: e.message });
+        // ad.js hataları zaten kullanıcıya gösterilebilir biçimde temizlenmiştir
+        // (translatePsAdError / withClient) — ham stack sızdırılmaz.
+        safeError(res, e, e.message || 'AD kullanıcı listesi alınamadı. Bağlantı ayarlarını kontrol edin.');
+    }
+});
+
+app.get('/api/ad/groups', async (req, res) => {
+    try {
+        const groups = await ad.getGroups();
+        res.json({ groups });
+    } catch (e) {
+        safeError(res, e, e.message || 'AD grup listesi alınamadı. Bağlantı ayarlarını kontrol edin.');
     }
 });
 
@@ -423,21 +506,134 @@ app.get('/api/ad/user/:sam', async (req, res) => {
             if (jobs.length) usedPrinters.push({ ip: p.ip, name: p.name, jobs: jobs.length });
         }
         user.usedResources = { printers: usedPrinters };
+        // Kişi IT envanteri — kayıtlı cihazlar + yazılımlar
+        user.devices = inventory.getDevicesForUser(user.sam);
+        // KVKK / ISO A.5.18 — kişisel veri görüntüleme izi
+        audit({ actor: currentUser(req).username, action: 'ad_view_user', entity: 'ad_user', entity_id: user.sam, ip: clientIp(req) });
         res.json({ user });
     } catch (e) {
-        res.status(400).json({ error: e.message });
+        safeError(res, e, e.message || 'Kullanıcı detayı alınamadı.');
+    }
+});
+
+// ============================================
+// KİŞİ IT ENVANTERİ (cihaz + yazılım) — ISO A.5.9
+// ============================================
+app.get('/api/inventory/user/:sam', (req, res) => {
+    try {
+        ad.assertValidSam(req.params.sam);
+        res.json({ devices: inventory.getDevicesForUser(req.params.sam), winrmEnabled: inventory.winrmEnabled() });
+    } catch (e) {
+        safeError(res, e, 'Envanter bilgisi alınamadı.');
+    }
+});
+
+// AD'den bilgisayar keşfi + (WinRM açıksa) donanım/yazılım toplama
+app.post('/api/inventory/collect/:sam', requireRole('operator'), async (req, res) => {
+    try {
+        const sam = ad.assertValidSam(req.params.sam);
+        const adResult = await inventory.discoverAdComputers(sam).catch(err => ({ supported: false, note: err.message, computers: [] }));
+        const collected = [];
+        if (inventory.winrmEnabled()) {
+            const targets = (req.body && Array.isArray(req.body.hostnames) && req.body.hostnames.length)
+                ? req.body.hostnames
+                : adResult.computers.map(c => c.hostname);
+            for (const h of targets.slice(0, 5)) { // aşırı yükü önle
+                try {
+                    const r = await inventory.collectViaWinRM(sam, h);
+                    collected.push({ hostname: h, ok: true, softwareCount: r.softwareCount });
+                } catch (err) {
+                    collected.push({ hostname: h, ok: false, error: 'Toplanamadı (WinRM erişimi/yetki).' });
+                    console.error('[Inventory] WinRM hatası:', h, err.message);
+                }
+            }
+        }
+        audit({ actor: currentUser(req).username, action: 'inventory_collect', entity: 'ad_user', entity_id: sam, detail: `${collected.filter(c => c.ok).length} cihaz toplandı`, ip: clientIp(req) });
+        res.json({ adDiscovery: adResult, collected, devices: inventory.getDevicesForUser(sam) });
+    } catch (e) {
+        safeError(res, e, 'Envanter toplama başarısız.');
+    }
+});
+
+// Elle cihaz ekleme/atama
+app.post('/api/inventory/device', requireRole('operator'), (req, res) => {
+    try {
+        const b = req.body || {};
+        const id = inventory.upsertDevice({ ...b, source: 'manual' });
+        audit({ actor: currentUser(req).username, action: 'create', entity: 'device', entity_id: id, detail: `${b.sam} ← ${b.hostname}`, ip: clientIp(req) });
+        res.json({ id });
+    } catch (e) {
+        safeError(res, e, e.message.includes('Geçersiz') ? e.message : 'Cihaz kaydedilemedi.');
+    }
+});
+
+app.put('/api/inventory/device/:id', requireRole('operator'), (req, res) => {
+    try {
+        inventory.updateDevice(parseInt(req.params.id), req.body || {});
+        audit({ actor: currentUser(req).username, action: 'update', entity: 'device', entity_id: req.params.id, ip: clientIp(req) });
+        res.json({ ok: true });
+    } catch (e) {
+        safeError(res, e, 'Cihaz güncellenemedi.');
+    }
+});
+
+app.delete('/api/inventory/device/:id', requireRole('operator'), (req, res) => {
+    try {
+        inventory.deleteDevice(parseInt(req.params.id));
+        audit({ actor: currentUser(req).username, action: 'delete', entity: 'device', entity_id: req.params.id, ip: clientIp(req) });
+        res.json({ ok: true });
+    } catch (e) {
+        safeError(res, e, 'Cihaz silinemedi.');
+    }
+});
+
+// ============================================
+// KULLANICI ERİŞİM RAPORU (ISO A.5.18 gözden geçirme kanıtı)
+// Kişinin tüm erişim profili tek yanıtta: gruplar, klasörler,
+// uygulamalar, cihazlar, kullandığı yazıcılar.
+// ============================================
+app.get('/api/report/user-access/:sam', async (req, res) => {
+    try {
+        const user = await ad.getUserDetail(req.params.sam);
+        const devices = inventory.getDevicesForUser(user.sam);
+        const usedPrinters = [];
+        for (const p of discoveredPrinters) {
+            const jobs = (p.queue || []).filter(q =>
+                (q.user || '').toLowerCase().includes((req.params.sam || '').toLowerCase()));
+            if (jobs.length) usedPrinters.push({ ip: p.ip, name: p.name, jobs: jobs.length });
+        }
+        audit({ actor: currentUser(req).username, action: 'access_report', entity: 'ad_user', entity_id: user.sam, ip: clientIp(req) });
+        res.json({
+            generatedAt: new Date().toISOString(),
+            user: {
+                sam: user.sam, displayName: user.displayName, department: user.department,
+                title: user.title, mail: user.mail, disabled: user.disabled,
+                lockedOut: user.lockedOut, lastLogon: user.lastLogon, whenCreated: user.whenCreated
+            },
+            groups: user.groups || [],
+            directGroups: user.directGroups || [],
+            folderPermissions: user.folderPermissions || {},
+            appAccess: user.appAccess || [],
+            devices,
+            usedPrinters
+        });
+    } catch (e) {
+        safeError(res, e, 'Erişim raporu oluşturulamadı.');
     }
 });
 
 // ============================================
 // AYARLAR & DENETİM LOGU
 // ============================================
-const SETTING_KEYS = ['currency', 'scan_base_ip', 'scan_cidr', 'ad_url', 'ad_base_dn', 'ad_bind_dn', 'ad_password', 'ad_share_roots', 'auto_refresh_minutes'];
+const SETTING_KEYS = ['currency', 'scan_base_ip', 'scan_cidr', 'snmp_community', 'ad_url', 'ad_base_dn', 'ad_bind_dn', 'ad_password', 'ad_share_roots', 'ad_tls_insecure', 'auto_refresh_minutes', 'winrm_enabled', 'app_access_map', 'readings_retention_days',
+    'snmp_version', 'snmp_v3_user', 'snmp_v3_auth_protocol', 'snmp_v3_auth_key', 'snmp_v3_priv_protocol', 'snmp_v3_priv_key'];
+// İstemciye asla dönmeyecek gizli ayarlar
+const SECRET_SETTING_KEYS = ['ad_password', 'snmp_v3_auth_key', 'snmp_v3_priv_key'];
 
 app.get('/api/settings', (req, res) => {
     const all = getAllSettings();
     const hasAdPassword = !!all.ad_password;
-    delete all.ad_password; // parolayı istemciye gönderme
+    for (const k of SECRET_SETTING_KEYS) delete all[k]; // sırları istemciye gönderme
     res.json({ settings: all, hasAdPassword });
 });
 
@@ -446,13 +642,20 @@ app.post('/api/settings', requireRole('admin'), (req, res) => {
     const changed = [];
     for (const key of SETTING_KEYS) {
         if (key in body) {
-            if (key === 'ad_password' && body[key] === '') continue; // boşsa mevcut parolayı koru
-            setSetting(key, body[key]);
+            if (SECRET_SETTING_KEYS.includes(key)) {
+                if (body[key] === '') continue; // boşsa mevcut sırrı koru
+                if (key === 'ad_password') setSecureSetting(key, body[key]); // safeStorage ile şifreli
+                else setSetting(key, body[key]); // SNMPv3 anahtarları (yerel DB)
+            } else {
+                setSetting(key, body[key]);
+            }
             changed.push(key);
         }
     }
     audit({ actor: currentUser(req).username, action: 'update', entity: 'settings', detail: changed.join(','), ip: clientIp(req) });
     if (changed.includes('auto_refresh_minutes')) scheduleAutoRefresh();
+    // AD/ACL ile ilgili ayarlar değiştiyse cache temizle (eski sonuç dönmesin)
+    if (changed.some(k => k.startsWith('ad_') || k === 'app_access_map')) ad.clearCache();
     res.json({ ok: true, changed });
 });
 
@@ -466,11 +669,13 @@ app.get('/api/audit', requireRole('admin'), (req, res) => {
 // SUNUCUYU BAŞLAT
 // ============================================
 function startServer() {
+    // Eski kurulumlardan kalan düz metin AD parolasını şifreli depoya taşı
+    try { migratePlaintextSecrets(); } catch (e) { console.error('[Server] Sır taşıma hatası:', e.message); }
     return new Promise((resolve) => {
-        const server = app.listen(PORT, () => {
+        const server = app.listen(PORT, HOST, () => {
             console.log(`\n  ╔══════════════════════════════════════╗`);
             console.log(`  ║   PrintHub API Sunucusu Başlatıldı   ║`);
-            console.log(`  ║   http://localhost:${PORT}             ║`);
+            console.log(`  ║   http://${HOST}:${PORT}            ║`);
             console.log(`  ╚══════════════════════════════════════╝\n`);
             resolve(server);
         });

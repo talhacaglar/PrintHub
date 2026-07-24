@@ -6,18 +6,58 @@
 
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { db, audit } = require('./db');
 
 // Rol hiyerarşisi — büyük sayı daha çok yetki
 const ROLE_LEVEL = { viewer: 1, operator: 2, admin: 3 };
+
+// bcrypt maliyet faktörü (OWASP önerisi >= 10; 12 masaüstü için makul)
+const BCRYPT_ROUNDS = 12;
+
+// --- Brute-force koruması (ISO A.8.5) ---
+// Kullanıcı adı bazlı başarısız giriş sayacı; eşik aşılırsa geçici kilit.
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MS = 5 * 60 * 1000; // 5 dakika
+const loginAttempts = new Map(); // username -> { count, lockedUntil }
+
+function checkLockout(username) {
+    const rec = loginAttempts.get(username);
+    if (!rec) return 0;
+    if (rec.lockedUntil && rec.lockedUntil > Date.now()) {
+        return Math.ceil((rec.lockedUntil - Date.now()) / 1000); // kalan saniye
+    }
+    if (rec.lockedUntil && rec.lockedUntil <= Date.now()) loginAttempts.delete(username);
+    return 0;
+}
+
+function recordLoginFailure(username) {
+    const rec = loginAttempts.get(username) || { count: 0, lockedUntil: 0 };
+    rec.count += 1;
+    if (rec.count >= MAX_LOGIN_ATTEMPTS) {
+        rec.lockedUntil = Date.now() + LOCKOUT_MS;
+        rec.count = 0; // kilit süresi dolunca temiz sayfa
+    }
+    loginAttempts.set(username, rec);
+    return rec.lockedUntil > Date.now();
+}
+
+function clearLoginFailures(username) {
+    loginAttempts.delete(username);
+}
 
 function clientIp(req) {
     return (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString();
 }
 
 // Oturum middleware'i (bellekte store — tek kullanıcılı masaüstü uygulaması için yeterli)
+// Oturum sırrı: env verilmemişse her açılışta rastgele üretilir.
+// Store bellekte olduğundan yeniden başlatmada oturumlar zaten düşer;
+// sabit/tahmin edilebilir sır kullanmaktan güvenlidir.
+const SESSION_SECRET = process.env.PRINTHUB_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
 const sessionMiddleware = session({
-    secret: process.env.PRINTHUB_SESSION_SECRET || 'printhub-local-secret-change-me',
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: { httpOnly: true, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 8 } // 8 saat
@@ -49,17 +89,28 @@ function currentUser(req) {
 
 // --- Rotalar ---
 function attachAuthRoutes(app) {
-    app.post('/api/login', (req, res) => {
+    app.post('/api/login', async (req, res) => {
         const { username, password } = req.body || {};
-        const row = db.prepare('SELECT * FROM app_users WHERE username = ?').get(username || '');
+        const uname = String(username || '');
         const ip = clientIp(req);
 
-        if (!row || !bcrypt.compareSync(password || '', row.password_hash)) {
-            audit({ actor: username || '?', action: 'login_failed', entity: 'auth', detail: 'Hatalı kimlik bilgisi', ip });
+        // Brute-force kilidi kontrolü
+        const lockRemain = checkLockout(uname);
+        if (lockRemain > 0) {
+            audit({ actor: uname || '?', action: 'login_locked', entity: 'auth', detail: `Hesap kilitli (${lockRemain}s)`, ip });
+            return res.status(429).json({ error: `Çok fazla başarısız deneme. ${Math.ceil(lockRemain / 60)} dakika sonra tekrar deneyin.` });
+        }
+
+        const row = db.prepare('SELECT * FROM app_users WHERE username = ?').get(uname);
+        const ok = row ? await bcrypt.compare(password || '', row.password_hash) : false;
+        if (!ok) {
+            const locked = recordLoginFailure(uname);
+            audit({ actor: uname || '?', action: 'login_failed', entity: 'auth', detail: locked ? 'Hatalı kimlik bilgisi — hesap geçici kilitlendi' : 'Hatalı kimlik bilgisi', ip });
             return res.status(401).json({ error: 'Kullanıcı adı veya parola hatalı.' });
         }
 
-        req.session.user = { id: row.id, username: row.username, role: row.role };
+        clearLoginFailures(uname);
+        req.session.user = { id: row.id, username: row.username, role: row.role, mustChangePassword: !!row.must_change_password };
         audit({ actor: row.username, action: 'login', entity: 'auth', ip });
         res.json({
             user: req.session.user,
@@ -80,18 +131,19 @@ function attachAuthRoutes(app) {
     });
 
     // Parola değiştirme (kendi hesabı)
-    app.post('/api/change-password', requireAuth, (req, res) => {
+    app.post('/api/change-password', requireAuth, async (req, res) => {
         const { currentPassword, newPassword } = req.body || {};
         if (!newPassword || newPassword.length < 6) {
             return res.status(400).json({ error: 'Yeni parola en az 6 karakter olmalı.' });
         }
         const me = currentUser(req);
         const row = db.prepare('SELECT * FROM app_users WHERE id = ?').get(me.id);
-        if (!bcrypt.compareSync(currentPassword || '', row.password_hash)) {
+        if (!(await bcrypt.compare(currentPassword || '', row.password_hash))) {
             return res.status(401).json({ error: 'Mevcut parola hatalı.' });
         }
-        const hash = bcrypt.hashSync(newPassword, 10);
+        const hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
         db.prepare('UPDATE app_users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, me.id);
+        if (req.session.user) req.session.user.mustChangePassword = false; // kapı middleware'i için bayrağı temizle
         audit({ actor: me.username, action: 'change_password', entity: 'user', entity_id: me.id, ip: clientIp(req) });
         res.json({ ok: true });
     });
@@ -102,13 +154,13 @@ function attachAuthRoutes(app) {
         res.json({ users });
     });
 
-    app.post('/api/users', requireRole('admin'), (req, res) => {
+    app.post('/api/users', requireRole('admin'), async (req, res) => {
         const { username, password, role } = req.body || {};
         if (!username || !password || !['admin', 'operator', 'viewer'].includes(role)) {
             return res.status(400).json({ error: 'Geçersiz kullanıcı bilgisi.' });
         }
         try {
-            const hash = bcrypt.hashSync(password, 10);
+            const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
             const info = db.prepare(`INSERT INTO app_users (username, password_hash, role, must_change_password)
                                      VALUES (?, ?, ?, 1)`).run(username, hash, role);
             audit({ actor: currentUser(req).username, action: 'create', entity: 'user', entity_id: info.lastInsertRowid, detail: `${username} (${role})`, ip: clientIp(req) });
@@ -118,7 +170,7 @@ function attachAuthRoutes(app) {
         }
     });
 
-    app.put('/api/users/:id', requireRole('admin'), (req, res) => {
+    app.put('/api/users/:id', requireRole('admin'), async (req, res) => {
         const { role, password } = req.body || {};
         const id = parseInt(req.params.id);
         const row = db.prepare('SELECT * FROM app_users WHERE id = ?').get(id);
@@ -128,7 +180,7 @@ function attachAuthRoutes(app) {
             db.prepare('UPDATE app_users SET role = ? WHERE id = ?').run(role, id);
         }
         if (password) {
-            const hash = bcrypt.hashSync(password, 10);
+            const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
             db.prepare('UPDATE app_users SET password_hash = ?, must_change_password = 1 WHERE id = ?').run(hash, id);
         }
         audit({ actor: currentUser(req).username, action: 'update', entity: 'user', entity_id: id, ip: clientIp(req) });

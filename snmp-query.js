@@ -139,17 +139,51 @@ function detectTonerColor(description) {
 }
 
 /**
+ * SNMP oturumu oluşturur — v2c (community) veya v3 (auth/priv) destekler.
+ * @param {string} ip
+ * @param {string|object} opts - string ise v2c community;
+ *   object ise { version:'3', user, authProtocol:'sha'|'md5'|'none',
+ *                authKey, privProtocol:'aes'|'des'|'none', privKey }
+ *   veya { version:'2c', community }
+ */
+function createSnmpSession(ip, opts) {
+    const base = { timeout: SNMP_TIMEOUT, retries: 1 };
+
+    if (opts && typeof opts === 'object' && opts.version === '3') {
+        // SNMPv3 — community düz metin gitmez; USM kullanıcı + auth/priv
+        const AUTH = { sha: snmp.AuthProtocols.sha, md5: snmp.AuthProtocols.md5 };
+        const PRIV = { aes: snmp.PrivProtocols.aes, des: snmp.PrivProtocols.des };
+        const user = { name: opts.user || '' };
+        const hasAuth = opts.authProtocol && opts.authProtocol !== 'none' && opts.authKey;
+        const hasPriv = hasAuth && opts.privProtocol && opts.privProtocol !== 'none' && opts.privKey;
+        if (hasPriv) {
+            user.level = snmp.SecurityLevel.authPriv;
+            user.authProtocol = AUTH[opts.authProtocol] || snmp.AuthProtocols.sha;
+            user.authKey = opts.authKey;
+            user.privProtocol = PRIV[opts.privProtocol] || snmp.PrivProtocols.aes;
+            user.privKey = opts.privKey;
+        } else if (hasAuth) {
+            user.level = snmp.SecurityLevel.authNoPriv;
+            user.authProtocol = AUTH[opts.authProtocol] || snmp.AuthProtocols.sha;
+            user.authKey = opts.authKey;
+        } else {
+            user.level = snmp.SecurityLevel.noAuthNoPriv;
+        }
+        return snmp.createV3Session(ip, user, base);
+    }
+
+    const community = typeof opts === 'string' ? opts : (opts && opts.community) || COMMUNITY;
+    return snmp.createSession(ip, community, { ...base, version: snmp.Version2c });
+}
+
+/**
  * Bir yazıcıdan tüm SNMP bilgilerini çeker.
  * @param {string} ip - Yazıcı IP adresi
- * @param {string} community - SNMP community string (varsayılan: "public")
+ * @param {string|object} snmpOpts - v2c community string veya v3 seçenek nesnesi
  * @returns {Promise<object>} Yazıcı bilgileri
  */
-async function queryPrinter(ip, community = COMMUNITY) {
-    const session = snmp.createSession(ip, community, {
-        timeout: SNMP_TIMEOUT,
-        retries: 1,
-        version: snmp.Version2c
-    });
+async function queryPrinter(ip, snmpOpts = COMMUNITY) {
+    const session = createSnmpSession(ip, snmpOpts);
 
     const printerInfo = {
         ip: ip,
@@ -159,7 +193,7 @@ async function queryPrinter(ip, community = COMMUNITY) {
         serialNumber: '',
         mac: '',
         status: 'online',
-        statusText: 'Çevrimiçi',
+        statusText: 'Çevrim İçi',
         firmware: '',
         color: false,
         type: 'laser',
@@ -214,7 +248,7 @@ async function queryPrinter(ip, community = COMMUNITY) {
                     1: { status: 'warning', text: 'Diğer' },
                     2: { status: 'warning', text: 'Bilinmiyor' },
                 };
-                const mapped = statusMap[code] || { status: 'online', text: 'Çevrimiçi' };
+                const mapped = statusMap[code] || { status: 'online', text: 'Çevrim İçi' };
                 printerInfo.status = mapped.status;
                 printerInfo.statusText = mapped.text;
             }
@@ -373,7 +407,7 @@ async function queryPrinter(ip, community = COMMUNITY) {
         printerInfo.snmpAvailable = false;
         printerInfo.name = `Yazıcı (${ip})`;
         printerInfo.model = 'SNMP Yanıt Yok';
-        printerInfo.statusText = 'Çevrimiçi (SNMP Kapalı)';
+        printerInfo.statusText = 'Çevrim İçi (SNMP Kapalı)';
     } finally {
         session.close();
     }
@@ -389,4 +423,4 @@ async function queryPrinter(ip, community = COMMUNITY) {
     return printerInfo;
 }
 
-module.exports = { queryPrinter, OID };
+module.exports = { queryPrinter, createSnmpSession, OID };

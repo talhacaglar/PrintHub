@@ -6,7 +6,7 @@ const net = require('net');
  */
 
 const PRINTER_PORTS = [9100, 631, 515];
-const CONNECT_TIMEOUT = 1500; // ms
+const CONNECT_TIMEOUT = 800; // ms — LAN için yeterli (eski: 1500)
 const MAX_CONCURRENT = 80;
 
 /**
@@ -43,13 +43,11 @@ function checkPort(ip, port) {
  * @returns {Promise<{ip: string, ports: number[]} | null>}
  */
 async function scanHost(ip) {
-    const openPorts = [];
-    for (const port of PRINTER_PORTS) {
-        const isOpen = await checkPort(ip, port);
-        if (isOpen) {
-            openPorts.push(port);
-        }
-    }
+    // 3 port paralel denenir — seri deneme yerine tek timeout süresi kadar bekler
+    const results = await Promise.all(
+        PRINTER_PORTS.map(port => checkPort(ip, port).then(open => (open ? port : null)))
+    );
+    const openPorts = results.filter(p => p !== null);
     if (openPorts.length > 0) {
         return { ip, ports: openPorts };
     }
@@ -98,31 +96,42 @@ async function scanNetwork({ subnets, start = 1, end = 254, onProgress }) {
 }
 
 /**
- * /22 subnet için subnet listesini oluşturur.
- * Kullanıcının IP'si 192.168.2.18/22 → 192.168.0.0 - 192.168.3.255
+ * Genel CIDR aritmetiği ile /24'lük subnet öneklerini üretir.
+ * Örn: 192.168.2.18/22 → ['192.168.0','192.168.1','192.168.2','192.168.3']
+ *      10.1.5.7/23     → ['10.1.4','10.1.5']
+ *      192.168.2.18/25 → ['192.168.2'] (aynı /24 içinde kalır)
+ * /16'dan geniş maskeler tarama patlamasını önlemek için /20'ye (16 subnet) sınırlanır.
  */
-function getSubnetsForCIDR(baseIp, cidr) {
-    const parts = baseIp.split('.').map(Number);
-    const maskBits = parseInt(cidr);
+const MAX_SUBNETS = 16; // en fazla 16 × /24 = 4096 IP taranır
 
-    if (maskBits === 24) {
-        return [`${parts[0]}.${parts[1]}.${parts[2]}`];
-    } else if (maskBits === 22) {
-        // /22 = 4 subnets
-        const baseThird = parts[2] & 0xFC; // Align to /22 boundary
-        return [
-            `${parts[0]}.${parts[1]}.${baseThird}`,
-            `${parts[0]}.${parts[1]}.${baseThird + 1}`,
-            `${parts[0]}.${parts[1]}.${baseThird + 2}`,
-            `${parts[0]}.${parts[1]}.${baseThird + 3}`
-        ];
-    } else if (maskBits === 16) {
-        // /16 = too many, scan only the user's /24
+function getSubnetsForCIDR(baseIp, cidr) {
+    const parts = String(baseIp).split('.').map(Number);
+    if (parts.length !== 4 || parts.some(p => isNaN(p) || p < 0 || p > 255)) {
+        return []; // geçersiz IP
+    }
+    let maskBits = parseInt(cidr);
+    if (isNaN(maskBits) || maskBits < 8 || maskBits > 32) maskBits = 24;
+
+    // /25..32 → tek /24 içinde kalır
+    if (maskBits >= 24) {
         return [`${parts[0]}.${parts[1]}.${parts[2]}`];
     }
 
-    // Default: scan user's /24
-    return [`${parts[0]}.${parts[1]}.${parts[2]}`];
+    // Ağ adresini hesapla (32-bit)
+    const ipNum = ((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3];
+    const mask = maskBits === 0 ? 0 : (0xFFFFFFFF << (32 - maskBits)) >>> 0;
+    const network = (ipNum & mask) >>> 0;
+
+    // Kaç adet /24 içeriyor? (aşırı büyük maskeler sınırlanır)
+    let count = Math.pow(2, 24 - maskBits);
+    if (count > MAX_SUBNETS) count = MAX_SUBNETS;
+
+    const subnets = [];
+    for (let i = 0; i < count; i++) {
+        const sub = (network + (i << 8)) >>> 0;
+        subnets.push(`${(sub >>> 24) & 0xFF}.${(sub >>> 16) & 0xFF}.${(sub >>> 8) & 0xFF}`);
+    }
+    return subnets;
 }
 
 module.exports = { scanNetwork, getSubnetsForCIDR, checkPort, scanHost };

@@ -26,3 +26,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Windows Server VM disk imaji (60+ GB) — asla commitlenmemeli
+test-ad/windows-server/storage/

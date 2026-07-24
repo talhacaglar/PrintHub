@@ -8,6 +8,9 @@
 const { db } = require('./db');
 
 const TONER_JUMP_THRESHOLD = 30; // seviye bu kadar puan yukarı sıçrarsa = kartuş değişimi
+const TONER_NEW_MIN_LEVEL = 75;  // yanlış pozitif azaltma: yeni kartuş en az bu seviyede başlamalı
+                                 // (SNMP okuma dalgalanmaları 30 puanlık sahte sıçrama yapabilir;
+                                 //  gerçek değişimde seviye ~%100'e çıkar)
 
 /**
  * Tek bir yazıcının anlık durumunu kaydeder.
@@ -52,9 +55,18 @@ function ym(dateStr) { return (dateStr || '').slice(0, 7); } // 'YYYY-MM'
  *  - toplam tahmini toner değişimi & maliyet (toner_types birim maliyetleriyle)
  */
 function getTonerUsageReport() {
-    const ips = db.prepare('SELECT DISTINCT printer_ip FROM printer_readings').all().map(r => r.printer_ip);
     const tonerTypes = db.prepare('SELECT * FROM toner_types').all();
     const nowMonth = ym(new Date().toISOString());
+
+    // N+1 yerine tek sorgu: tüm okumalar bir kerede çekilir, JS'te IP bazında gruplanır
+    const allRows = db.prepare(`SELECT printer_ip, total_printed, toner_json, captured_at, name
+                                FROM printer_readings
+                                ORDER BY printer_ip, captured_at ASC`).all();
+    const rowsByIp = new Map();
+    for (const r of allRows) {
+        if (!rowsByIp.has(r.printer_ip)) rowsByIp.set(r.printer_ip, []);
+        rowsByIp.get(r.printer_ip).push(r);
+    }
 
     const byPrinter = [];
     const monthlyMap = {};   // 'YYYY-MM' -> pages
@@ -62,10 +74,7 @@ function getTonerUsageReport() {
     let totalCost = 0;
     const currency = (db.prepare("SELECT value FROM settings WHERE key='currency'").get() || {}).value || 'TRY';
 
-    for (const ip of ips) {
-        const rows = db.prepare(`SELECT total_printed, toner_json, captured_at, name
-                                 FROM printer_readings WHERE printer_ip = ?
-                                 ORDER BY captured_at ASC`).all(ip);
+    for (const [ip, rows] of rowsByIp) {
         if (rows.length === 0) continue;
 
         const name = rows[rows.length - 1].name || ip;
@@ -93,7 +102,10 @@ function getTonerUsageReport() {
             if (prev) {
                 for (const [color, level] of Object.entries(toner)) {
                     const p = prev[color];
-                    if (typeof p === 'number' && typeof level === 'number' && level - p >= TONER_JUMP_THRESHOLD) {
+                    // Değişim = büyük yukarı sıçrama VE yeni seviyenin dolu kartuşa yakın olması
+                    if (typeof p === 'number' && typeof level === 'number'
+                        && level - p >= TONER_JUMP_THRESHOLD
+                        && level >= TONER_NEW_MIN_LEVEL) {
                         replacements[color] = (replacements[color] || 0) + 1;
                     }
                 }
@@ -132,4 +144,28 @@ function getTonerUsageReport() {
     };
 }
 
-module.exports = { recordReading, recordAll, getHistory, getTonerUsageReport };
+/**
+ * Saklama (retention) politikası — printer_readings sınırsız büyümesin.
+ * retentionDays'ten eski kayıtlar gün bazında özetlenir (her yazıcı+gün için
+ * son okuma tutulur, ara okumalar silinir). Böylece aylık tüketim hesabı
+ * (ay içi min/max) bozulmadan tablo küçük kalır.
+ */
+function pruneReadings(retentionDays = 90) {
+    const days = parseInt(retentionDays) || 90;
+    if (days <= 0) return { deleted: 0 };
+    const info = db.prepare(`
+        DELETE FROM printer_readings
+        WHERE captured_at < datetime('now', ?)
+          AND id NOT IN (
+              SELECT MAX(id) FROM printer_readings
+              WHERE captured_at < datetime('now', ?)
+              GROUP BY printer_ip, date(captured_at)
+          )
+    `).run(`-${days} days`, `-${days} days`);
+    if (info.changes > 0) {
+        console.log(`[Readings] Saklama politikası: ${info.changes} eski ham okuma özetlendi (${days} günden eski).`);
+    }
+    return { deleted: info.changes };
+}
+
+module.exports = { recordReading, recordAll, getHistory, getTonerUsageReport, pruneReadings };

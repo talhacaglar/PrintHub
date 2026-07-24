@@ -5,8 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Ağ Yazıcı Yönetim Paneli - Tüm ağa bağlı yazıcıların durumunu, toner seviyelerini ve yazdırma kuyruklarını izleyin.">
     <title>Ağ Yazıcı Yönetim Paneli</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+    <link rel="stylesheet" href="assets/fonts/fonts.css">
     <link rel="stylesheet" href="style.css">
     <script>
         // Tema tercihini sayfa çizilmeden uygula (FOUC önleme)
@@ -150,7 +149,7 @@
                 </div>
                 <div class="stat-info">
                     <span class="stat-value" id="statOnline">0</span>
-                    <span class="stat-label">Çevrimiçi</span>
+                    <span class="stat-label">Çevrim İçi</span>
                 </div>
                 <div class="stat-trend up">
                     <span class="material-icons-round">check_circle</span>
@@ -162,7 +161,7 @@
                 </div>
                 <div class="stat-info">
                     <span class="stat-value" id="statOffline">0</span>
-                    <span class="stat-label">Çevrimdışı</span>
+                    <span class="stat-label">Çevrim Dışı</span>
                 </div>
                 <div class="stat-trend down">
                     <span class="material-icons-round">error</span>
@@ -192,6 +191,18 @@
                     <span class="material-icons-round">schedule</span>
                 </div>
             </div>
+            <div class="stat-card stat-cost">
+                <div class="stat-icon-wrap">
+                    <span class="material-icons-round">payments</span>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="statMonthlyCost" style="font-size:22px">—</span>
+                    <span class="stat-label">Bu Ay Toner Maliyeti</span>
+                </div>
+                <div class="stat-trend neutral">
+                    <span class="material-icons-round">calendar_month</span>
+                </div>
+            </div>
         </section>
 
         <!-- Filter Bar -->
@@ -199,10 +210,10 @@
             <div class="filter-chips">
                 <button class="chip active" data-filter="all" id="filterAll">Tümü</button>
                 <button class="chip" data-filter="online" id="filterOnline">
-                    <span class="chip-dot online"></span>Çevrimiçi
+                    <span class="chip-dot online"></span>Çevrim İçi
                 </button>
                 <button class="chip" data-filter="offline" id="filterOffline">
-                    <span class="chip-dot offline"></span>Çevrimdışı
+                    <span class="chip-dot offline"></span>Çevrim Dışı
                 </button>
                 <button class="chip" data-filter="warning" id="filterWarning">
                     <span class="chip-dot warning"></span>Uyarı
@@ -306,9 +317,54 @@
                     <div class="form-group">
                         <label>CIDR Maskesi</label>
                         <select id="setCidr" class="form-input">
+                            <option value="25">/25 (126 IP)</option>
                             <option value="24">/24 (254 IP, Tek Subnet)</option>
+                            <option value="23">/23 (510 IP, 2 Subnet)</option>
                             <option value="22" selected>/22 (1022 IP, 4 Subnet)</option>
+                            <option value="21">/21 (2046 IP, 8 Subnet)</option>
+                            <option value="20">/20 (4094 IP, 16 Subnet)</option>
                         </select>
+                    </div>
+                    <div class="form-group">
+                        <label>SNMP Sürümü</label>
+                        <select id="setSnmpVersion" class="form-input" onchange="toggleSnmpV3Fields()">
+                            <option value="2c" selected>v2c (community)</option>
+                            <option value="3">v3 (auth/priv — önerilen)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="snmpV2Fields">
+                        <label>SNMP Community</label>
+                        <input type="text" id="setSnmpCommunity" value="public" class="form-input" placeholder="public">
+                    </div>
+                    <div id="snmpV3Fields" style="display:none">
+                        <div class="form-group">
+                            <label>SNMPv3 Kullanıcı</label>
+                            <input type="text" id="setSnmpV3User" class="form-input" placeholder="snmpuser">
+                        </div>
+                        <div class="form-group">
+                            <label>Auth Protokolü</label>
+                            <select id="setSnmpV3AuthProto" class="form-input">
+                                <option value="sha" selected>SHA</option>
+                                <option value="md5">MD5</option>
+                                <option value="none">Yok</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Auth Parolası <span class="pw-hint" id="snmpV3AuthHint"></span></label>
+                            <input type="password" id="setSnmpV3AuthKey" class="form-input" autocomplete="new-password">
+                        </div>
+                        <div class="form-group">
+                            <label>Priv Protokolü</label>
+                            <select id="setSnmpV3PrivProto" class="form-input">
+                                <option value="aes" selected>AES</option>
+                                <option value="des">DES</option>
+                                <option value="none">Yok</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Priv Parolası <span class="pw-hint" id="snmpV3PrivHint"></span></label>
+                            <input type="password" id="setSnmpV3PrivKey" class="form-input" autocomplete="new-password">
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Para Birimi</label>
@@ -317,6 +373,10 @@
                     <div class="form-group">
                         <label>Otomatik Yenileme (dakika, 0 = kapalı)</label>
                         <input type="number" id="setAutoRefresh" value="0" min="0" max="1440" class="form-input">
+                    </div>
+                    <div class="form-group">
+                        <label>Okuma Geçmişi Saklama (gün — eski ham veriler günlük özete indirgenir)</label>
+                        <input type="number" id="setRetentionDays" value="90" min="7" max="3650" class="form-input">
                     </div>
                     <button id="saveSettingsBtn" class="scan-btn" style="margin-top: 10px;">
                         <span class="material-icons-round">save</span>
@@ -336,7 +396,15 @@
                     </div>
                     <div class="form-group">
                         <label>Bind DN (servis hesabı)</label>
-                        <input type="text" id="setAdBindDn" placeholder="CN=svc,OU=Servis,DC=sirket,DC=local" class="form-input">
+                        <input type="text" id="setAdBindDn" placeholder="Linux: CN=svc,OU=Servis,DC=sirket,DC=local  |  Windows: svc@sirket.local" class="form-input">
+                        <small class="pw-hint" style="display:block; margin-top:4px; line-height:1.5;">
+                            ⚠️ Uygulama <strong>Windows'ta</strong> PowerShell RSAT (Active Directory modülü) kullanır ve
+                            hesap adını <strong>Kerberos/NTLM</strong> biçiminde bekler:
+                            <code>kullanici@alanadi.local</code> veya <code>ALANADI\kullanici</code>.
+                            <strong>Linux'ta</strong> ise doğrudan LDAP bağlanır ve <code>CN=...,DC=...</code> biçimindeki
+                            tam DN kullanılır. Aynı ayar Windows'ta LDAP DN biçiminde girilirse liste boş döner /
+                            kimlik doğrulama hatası alınır.
+                        </small>
                     </div>
                     <div class="form-group">
                         <label>Parola <span id="adPwHint" class="pw-hint"></span></label>
@@ -345,6 +413,12 @@
                     <div class="form-group">
                         <label>Paylaşım Kök Yolları (her satıra bir yol)</label>
                         <textarea id="setAdShareRoots" class="form-input" rows="3" placeholder="\\dosya-sunucu\Ortak&#10;\\dosya-sunucu\Departmanlar"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="setAdTlsInsecure" style="width:auto;">
+                            <span>LDAPS sertifika doğrulamasını atla <small style="opacity:.7">(yalnızca test / kendi imzalı sertifika)</small></span>
+                        </label>
                     </div>
                     <div style="display:flex; gap:10px; margin-top:10px;">
                         <button id="saveAdBtn" class="scan-btn">
@@ -357,6 +431,30 @@
                         </button>
                     </div>
                     <div id="adTestResult" class="ad-test-result"></div>
+                    <small class="pw-hint" style="display:block; margin-top:8px; line-height:1.5;">
+                        ℹ️ "Bağlantıyı Test Et" her zaman doğrudan LDAP protokolü ile dener. Windows'ta gerçek
+                        kullanıcı/grup listesi ise PowerShell RSAT (Active Directory modülü) üzerinden çekilir —
+                        bu yüzden test başarılı görünse bile Windows'ta "AD" sekmesi RSAT kurulu değilse veya
+                        yukarıdaki hesap Kerberos/NTLM biçiminde girilmemişse boş/hatalı dönebilir.
+                    </small>
+                </div>
+
+                <div class="settings-card">
+                    <h3>Kişi IT Envanteri</h3>
+                    <div class="form-group">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="setWinrmEnabled" style="width:auto;">
+                            <span>WinRM ile uzak envanter toplama <small style="opacity:.7">(donanım + yüklü uygulamalar; yalnızca Windows'ta çalışır)</small></span>
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label>Uygulama Erişim Eşlemesi (her satır: <code>ADGrubu = Uygulama Adı</code>)</label>
+                        <textarea id="setAppAccessMap" class="form-input" rows="4" placeholder="SAP_Users = SAP ERP&#10;VPN_Access = FortiClient VPN&#10;CRM_Satis = Salesforce CRM"></textarea>
+                    </div>
+                    <button id="saveInvBtn" class="scan-btn" style="margin-top:10px;">
+                        <span class="material-icons-round">save</span>
+                        <span class="scan-btn-text">Envanter Ayarlarını Kaydet</span>
+                    </button>
                 </div>
             </div>
         </div>
@@ -423,6 +521,11 @@
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <!-- Modüler frontend: core (state/auth/api) → printers → settings → pages → ad -->
+    <script src="js/core.js"></script>
+    <script src="js/printers-ui.js"></script>
+    <script src="js/settings-ui.js"></script>
+    <script src="js/pages-ui.js"></script>
+    <script src="js/ad-ui.js"></script>
 </body>
 </html>

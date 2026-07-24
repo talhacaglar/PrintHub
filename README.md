@@ -89,7 +89,7 @@ npm run build:linux   # Linux
 | `auth.js` | Kimlik doğrulama, oturum, RBAC, kullanıcı yönetimi |
 | `readings.js` | Yazıcı okuma geçmişi + toner tüketim hesabı |
 | `ad.js` | Active Directory / LDAP + klasör ACL çözümleme |
-| `index.html`, `app.js`, `style.css` | Arayüz |
+| `index.html`, `js/*.js`, `style.css` | Arayüz (core / printers-ui / settings-ui / pages-ui / ad-ui modülleri) |
 
 ## Veri Saklama
 

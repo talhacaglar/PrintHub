@@ -95,6 +95,38 @@ function migrate() {
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        -- Kişi IT envanteri: kullanıcıya atanmış cihazlar (ISO A.5.9)
+        CREATE TABLE IF NOT EXISTS user_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sam TEXT NOT NULL,                           -- AD kullanıcı adı (sAMAccountName)
+            hostname TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',       -- ad | winrm | manual
+            model TEXT DEFAULT '',
+            serial TEXT DEFAULT '',
+            cpu TEXT DEFAULT '',
+            ram_gb REAL DEFAULT 0,
+            disk_gb REAL DEFAULT 0,
+            os TEXT DEFAULT '',
+            asset_tag TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            last_seen TEXT DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(sam, hostname)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_devices_sam ON user_devices(sam);
+
+        -- Cihazlardaki yüklü yazılım envanteri (WinRM ile toplanır)
+        CREATE TABLE IF NOT EXISTS device_software (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id INTEGER NOT NULL REFERENCES user_devices(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            version TEXT DEFAULT '',
+            publisher TEXT DEFAULT '',
+            install_date TEXT DEFAULT '',
+            captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_device_software_dev ON device_software(device_id);
+
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             actor TEXT DEFAULT '',
@@ -129,17 +161,55 @@ function seed() {
         currency: 'TRY',
         scan_base_ip: '192.168.2.18',
         scan_cidr: '22',
+        snmp_community: 'public',    // SNMP v2c community string
         ad_url: '',
         ad_base_dn: '',
         ad_bind_dn: '',
         ad_password: '',            // safeStorage ile şifreli saklanabilir (main.js)
         ad_share_roots: '[]',       // JSON dizi: taranacak paylaşım kök yolları
-        auto_refresh_minutes: '0'   // 0 = otomatik yenileme kapalı
+        ad_tls_insecure: '0',       // 1 = LDAPS sertifika doğrulamasını atla (SADECE test)
+        auto_refresh_minutes: '0',  // 0 = otomatik yenileme kapalı
+        winrm_enabled: '0',         // 1 = WinRM ile uzak envanter toplama açık (yalnız Windows)
+        app_access_map: '[]',       // JSON: [{group:"SAP_Users", app:"SAP ERP", note:""}]
+        readings_retention_days: '90', // printer_readings ham veri saklama süresi (gün)
+        snmp_version: '2c',         // '2c' veya '3'
+        snmp_v3_user: '',           // SNMPv3 USM kullanıcı adı
+        snmp_v3_auth_protocol: 'sha', // sha | md5 | none
+        snmp_v3_auth_key: '',       // auth parolası (gizli)
+        snmp_v3_priv_protocol: 'aes', // aes | des | none
+        snmp_v3_priv_key: ''        // priv parolası (gizli)
     };
     const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
     for (const [k, v] of Object.entries(defaults)) insert.run(k, v);
 }
 seed();
+
+// ============================================
+// TEK SEFERLİK TEMİZLİK — Test/simülasyon AD ayarları
+// Geliştirme sırasında kullanılan AD simülasyonuna (staj.local /
+// 192.168.137.10) ait bağlantı bilgileri veritabanında kalmışsa
+// açılışta otomatik temizlenir. Gerçek şirket AD ayarlarına dokunmaz.
+// ============================================
+function cleanupSimulationAdConfig() {
+    const get = (k) => {
+        const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(k);
+        return row ? String(row.value || '') : '';
+    };
+    const url = get('ad_url');
+    const baseDn = get('ad_base_dn');
+    const bindDn = get('ad_bind_dn');
+    const isSim = url.includes('192.168.137.10')
+        || /dc=staj\b/i.test(baseDn)
+        || /@staj\.local$/i.test(bindDn);
+    if (!isSim) return;
+    const clear = db.prepare(`INSERT INTO settings (key, value) VALUES (?, '')
+                              ON CONFLICT(key) DO UPDATE SET value = ''`);
+    for (const key of ['ad_url', 'ad_base_dn', 'ad_bind_dn', 'ad_password', 'ad_tls_insecure']) {
+        clear.run(key);
+    }
+    console.log('[DB] Simülasyon AD ayarları (staj.local) temizlendi — Ayarlar > Active Directory boş.');
+}
+cleanupSimulationAdConfig();
 
 // ============================================
 // AYAR YARDIMCILARI
@@ -160,6 +230,65 @@ function getAllSettings() {
 }
 
 // ============================================
+// GÜVENLİ (ŞİFRELİ) AYARLAR — Electron safeStorage
+// AD servis hesabı parolası gibi sırlar DB'de düz metin yerine
+// işletim sistemi anahtar deposuyla (DPAPI/Keychain/kwallet) şifrelenir.
+// Electron dışı çalıştırmada (node server.js) düz metne düşer.
+// ============================================
+const SECURE_PREFIX = 'enc:v1:';
+
+function getSafeStorage() {
+    try {
+        const { safeStorage } = require('electron');
+        if (safeStorage && safeStorage.isEncryptionAvailable()) return safeStorage;
+    } catch (e) { /* Electron dışı ortam */ }
+    return null;
+}
+
+function setSecureSetting(key, value) {
+    const plain = String(value ?? '');
+    const ss = getSafeStorage();
+    if (ss && plain) {
+        const enc = ss.encryptString(plain).toString('base64');
+        setSetting(key, SECURE_PREFIX + enc);
+    } else {
+        setSetting(key, plain);
+    }
+}
+
+function getSecureSetting(key) {
+    const raw = getSetting(key);
+    if (raw == null || raw === '') return raw;
+    if (!raw.startsWith(SECURE_PREFIX)) return raw; // eski düz metin kayıt
+    const ss = getSafeStorage();
+    if (!ss) return null; // şifreli veri var ama çözülemiyor
+    try {
+        return ss.decryptString(Buffer.from(raw.slice(SECURE_PREFIX.length), 'base64'));
+    } catch (e) {
+        console.error(`[DB] Güvenli ayar çözülemedi (${key}):`, e.message);
+        return null;
+    }
+}
+
+function isSecureValue(raw) {
+    return typeof raw === 'string' && raw.startsWith(SECURE_PREFIX);
+}
+
+// Fırsatçı geçiş: daha önce düz metin kaydedilmiş AD parolasını
+// safeStorage kullanılabilir olur olmaz şifreli biçime taşı.
+function migratePlaintextSecrets() {
+    const ss = getSafeStorage();
+    if (!ss) return;
+    for (const key of ['ad_password']) {
+        const raw = getSetting(key);
+        if (raw && !raw.startsWith(SECURE_PREFIX)) {
+            setSecureSetting(key, raw);
+            console.log(`[DB] '${key}' ayarı şifreli depolamaya taşındı.`);
+        }
+    }
+}
+
+// ============================================
 // DENETİM LOGU (ISO 27001 A.8.15)
 // ============================================
 function audit({ actor = '', action, entity = '', entity_id = '', detail = '', ip = '' }) {
@@ -173,5 +302,9 @@ module.exports = {
     getSetting,
     setSetting,
     getAllSettings,
+    setSecureSetting,
+    getSecureSetting,
+    isSecureValue,
+    migratePlaintextSecrets,
     audit,
 };
