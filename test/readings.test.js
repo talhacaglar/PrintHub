@@ -38,6 +38,21 @@ test('getTonerUsageReport: tek sorgu ile aylık tüketimi hesaplar', { skip: !na
     assert.strictEqual(p.monthlyPages, 500); // 1500 - 1000
 });
 
+test('getTonerUsageReport: SNMP yanıtsız (0) okumalar tüketimi şişirmez', { skip: !nativeOk }, () => {
+    // Regresyon: SNMP cevap vermeyince total_printed=0 kaydedilir. Bu sıfır ay içi
+    // "min" olarak alınırsa aylık tüketim, cihazın ömür sayacı kadar şişer
+    // (gerçek vakada 8.358 yerine 1.070.993 sayfa görünüyordu).
+    const ym = new Date().toISOString().slice(0, 7);
+    insertReading('10.0.0.9', `${ym}-02 08:00:00`, 100000);
+    insertReading('10.0.0.9', `${ym}-03 08:00:00`, 0);      // SNMP yanıt yok
+    insertReading('10.0.0.9', `${ym}-04 08:00:00`, 100450);
+
+    const report = readings.getTonerUsageReport();
+    const p = report.byPrinter.find(x => x.ip === '10.0.0.9');
+    assert.ok(p, 'yazıcı raporda olmalı');
+    assert.strictEqual(p.monthlyPages, 450); // 100450 - 100000, sıfır yok sayılır
+});
+
 test('pruneReadings: eski ham kayıtları günlük özete indirger', { skip: !nativeOk }, () => {
     // 200 gün önce aynı güne 3 kayıt — yalnız sonuncusu kalmalı
     const old = new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10);

@@ -80,10 +80,15 @@ function getTonerUsageReport() {
         const name = rows[rows.length - 1].name || ip;
 
         // Aylık sayfa: her ay için (max - min) total_printed
+        // ÖNEMLİ: SNMP yanıt vermediğinde sayaç 0 kaydedilir. Bu sıfırlar min
+        // olarak alınırsa aylık tüketim, cihazın ömür boyu sayacı kadar şişer
+        // (ör. 0 → 349.985 = "bu ay 349 bin sayfa"). Bu yüzden yalnızca
+        // pozitif okumalar hesaba katılır.
         const perMonth = {}; // month -> {min,max}
         for (const r of rows) {
-            const m = ym(r.captured_at);
             const tp = r.total_printed || 0;
+            if (tp <= 0) continue; // geçersiz/SNMP'siz okuma
+            const m = ym(r.captured_at);
             if (!perMonth[m]) perMonth[m] = { min: tp, max: tp };
             perMonth[m].min = Math.min(perMonth[m].min, tp);
             perMonth[m].max = Math.max(perMonth[m].max, tp);

@@ -24,6 +24,32 @@ const ROLE_LEVEL = { viewer: 1, operator: 2, admin: 3 };
 let appInitialized = false;
 
 // ============================================
+// OTURUM JETONU (Bearer token)
+// Girişte sunucudan alınan jeton sessionStorage'da tutulur; her API
+// isteğinde Authorization başlığıyla gönderilir. sessionStorage tercih
+// edilir çünkü sekme/pencere kapanınca jeton kalıcı olarak kalmaz.
+// ============================================
+const TOKEN_KEY = 'printhub-token';
+
+function getToken() {
+    try { return sessionStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+}
+
+function setToken(token) {
+    try {
+        if (token) sessionStorage.setItem(TOKEN_KEY, token);
+        else sessionStorage.removeItem(TOKEN_KEY);
+    } catch (e) { /* depolama kapalıysa çerez oturumu devrede kalır */ }
+}
+
+// İstek seçeneklerine Authorization başlığını ekler
+function withAuth(opts = {}) {
+    const token = getToken();
+    if (!token) return opts;
+    return { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } };
+}
+
+// ============================================
 // DOM REFERENCES
 // ============================================
 const $ = (sel) => document.querySelector(sel);
@@ -69,12 +95,14 @@ function updateThemeIcon() {
 // ============================================
 async function bootstrap() {
     try {
-        const res = await fetch(`${API_BASE}/api/me`);
+        // Kayıtlı jeton varsa onunla doğrula; yoksa çerez oturumu denenir
+        const res = await fetch(`${API_BASE}/api/me`, withAuth());
         if (res.ok) {
             const data = await res.json();
             onLoggedIn(data.user);
             return;
         }
+        setToken(null); // jeton süresi dolmuş/iptal edilmiş
     } catch (e) { /* sunucu hazır değil */ }
     showLogin();
 }
@@ -135,6 +163,7 @@ function setupAuthListeners() {
             const data = await res.json();
             if (!res.ok) { errEl.textContent = data.error || "Giriş başarısız."; return; }
             document.getElementById("loginPass").value = "";
+            setToken(data.token); // sonraki isteklerde Authorization başlığı
             onLoggedIn(data.user);
             if (data.mustChangePassword) openPwModal(true);
         } catch (err) {
@@ -143,7 +172,9 @@ function setupAuthListeners() {
     });
 
     document.getElementById("logoutBtn").addEventListener("click", async () => {
-        await fetch(`${API_BASE}/api/logout`, { method: 'POST' });
+        // Jetonu sunucuda iptal et, sonra yerelden sil
+        try { await fetch(`${API_BASE}/api/logout`, withAuth({ method: 'POST' })); } catch (e) { /* çevrimdışı */ }
+        setToken(null);
         session = null;
         if (autoRefreshInterval) clearInterval(autoRefreshInterval);
         printers = [];
@@ -159,11 +190,13 @@ function setupAuthListeners() {
             currentPassword: document.getElementById("pwCurrent").value,
             newPassword: document.getElementById("pwNew").value
         };
-        const res = await fetch(`${API_BASE}/api/change-password`, {
+        const res = await fetch(`${API_BASE}/api/change-password`, withAuth({
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-        });
+        }));
         const data = await res.json();
         if (!res.ok) { errEl.textContent = data.error || "Değiştirilemedi."; return; }
+        // Sunucu eski jetonları iptal edip yenisini verdi — kaydet
+        if (data.token) setToken(data.token);
         document.getElementById("pwModalOverlay").classList.remove("show");
         document.getElementById("pwForm").reset();
         if (session) session.mustChangePassword = false;
@@ -220,10 +253,11 @@ function restoreLastPage() {
     }
 }
 
+// Her API isteğine Bearer jetonunu ekler.
 // 401 gelirse oturumu düşür; 403 + mustChangePassword gelirse parola modalını aç
 async function apiFetch(url, opts) {
-    const res = await fetch(url, opts);
-    if (res.status === 401) { session = null; showLogin(); }
+    const res = await fetch(url, withAuth(opts));
+    if (res.status === 401) { session = null; setToken(null); showLogin(); }
     else if (res.status === 403 && !url.endsWith('/change-password')) {
         // Kapı yanıtını yıkıcı olmadan kontrol et
         const clone = res.clone();
@@ -238,7 +272,8 @@ async function apiFetch(url, opts) {
 
 async function fetchPrinters() {
     try {
-        const res = await fetch(`${API_BASE}/api/printers`);
+        const res = await apiFetch(`${API_BASE}/api/printers`);
+        if (!res.ok) return; // 401/403 apiFetch içinde ele alınır
         const data = await res.json();
         printers = data.printers || [];
 
@@ -290,7 +325,8 @@ async function startScan() {
 
 async function pollScanStatus() {
     try {
-        const res = await fetch(`${API_BASE}/api/status`);
+        const res = await apiFetch(`${API_BASE}/api/status`);
+        if (!res.ok) return;
         const status = await res.json();
 
         document.getElementById("scanProgressFill").style.width = status.progress + "%";
@@ -331,12 +367,13 @@ async function refreshPrinters() {
         const icon = document.querySelector("#refreshBtn .material-icons-round");
         icon.classList.add("spinning");
 
-        await fetch(`${API_BASE}/api/refresh`, { method: 'POST' });
+        await apiFetch(`${API_BASE}/api/refresh`, { method: 'POST' });
 
         // Yenileme tamamlanana kadar bekle
         let retries = 0;
         const checkRefresh = setInterval(async () => {
-            const res = await fetch(`${API_BASE}/api/status`);
+            const res = await apiFetch(`${API_BASE}/api/status`);
+            if (!res.ok) { clearInterval(checkRefresh); icon.classList.remove("spinning"); return; }
             const status = await res.json();
             retries++;
 

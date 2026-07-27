@@ -5,8 +5,10 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test 'test/**/*.test.js'",
+    "test": "node scripts/run-tests.js",
+    "test:node": "node --test test/**/*.test.js",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "rebuild:clean": "node scripts/rebuild-clean.js",
     "postinstall": "electron-rebuild -f -w better-sqlite3 || true",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux"
@@ -40,6 +42,7 @@
     "express": "^5.2.1",
     "express-session": "^1.19.0",
     "ldapts": "^9.0.0",
-    "net-snmp": "^3.26.3"
+    "net-snmp": "^3.26.3",
+    "xlsx": "^0.18.5"
   }
 }

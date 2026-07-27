@@ -46,6 +46,7 @@ denetim kaydı bir arada. Electron + Express + SQLite ile geliştirilmiştir.
 | 🛡️ **ISO 27001 / Güvenlik** | Rol tabanlı erişim (RBAC), aranabilir/filtrelenebilir denetim kaydı, erişim hakları raporu, kullanıcı yönetimi ve zorunlu ilk parola değişimi. |
 | 🌗 **Açık / Karanlık Tema** | Üst bardaki düğmeyle geçiş, tercih kalıcı; minimalist, sade arayüz. |
 | 📤 **CSV Dışa Aktarma** | Stok hareketleri, denetim kaydı, maliyet ve tüketim tabloları tek tıkla CSV (Excel uyumlu, UTF-8 BOM). |
+| 📊 **Toner Takip Excel** | Stok sayfasındaki tek düğmeyle, şirkette kullanılan `Toner_Takip.xlsx` ile birebir aynı yapıda 5 sayfalık çalışma kitabı (`Toner_Degisim`, `StokDurum`, `StokGirisCikis`, `Uyumluluk Tablosu`, `Sayfa1`). |
 | 🏷️ **Varlık Envanteri Alanları** | Yazıcılara demirbaş no, özel konum ve not eklenebilir (ISO A.5.9). |
 | ⏱️ **Otomatik Periyodik Yenileme** | Ayarlanan aralıkta yazıcılar arka planda sorgulanır; tüketim zaman serisi otomatik beslenir. |
 
@@ -57,7 +58,7 @@ denetim kaydı bir arada. Electron + Express + SQLite ile geliştirilmiştir.
 | A.5.15 / A.5.18 | Erişim kontrolü & hakları | RBAC + AD klasör yetkileri görünümü |
 | A.8.15 | Loglama | Tüm oluştur/güncelle/sil ve giriş olayları denetim kaydında |
 | A.8.16 | İzleme | Düşük stok/toner ve başarısız giriş uyarıları |
-| A.5.17 / A.8.5 | Kimlik doğrulama | bcrypt parola hash + zorunlu giriş + zorunlu ilk parola değişimi |
+| A.5.17 / A.8.5 | Kimlik doğrulama | bcrypt parola hash + **Bearer jeton doğrulaması** (SHA-256 özeti saklanır, 8 saat geçerli, iptal edilebilir) + zorunlu ilk parola değişimi |
 
 ---
 
@@ -70,6 +71,31 @@ npm install
 ```
 
 > `better-sqlite3` yerel (native) bir modüldür ve `postinstall` adımında Electron ABI'sine göre otomatik derlenir. Manuel gerektiğinde: `npm run rebuild`.
+
+<details>
+<summary><strong>Hata: <code>NODE_MODULE_VERSION 147 / 148 uyuşmuyor</code></strong></summary>
+
+`npm start` sırasında şu hatayı alırsanız:
+
+```
+The module '.../better_sqlite3.node' was compiled against a different
+Node.js version using NODE_MODULE_VERSION 147. This version of Node.js
+requires NODE_MODULE_VERSION 148.
+```
+
+`better-sqlite3`, Electron'un değil sistem Node'unun ABI'siyle derlenmiş demektir
+(genelde `npm install --ignore-scripts` sonrası veya Node sürümü yükseltilince olur).
+Temiz derleme ile çözülür:
+
+```bash
+npm run rebuild:clean
+```
+
+Bu komut önce `node_modules/better-sqlite3/build` dizinini siler, sonra
+`electron-rebuild` çalıştırır. (Yalnız `npm run rebuild` bazen eski `build/`
+kalıntısı yüzünden `opening dependency file ... No such file or directory`
+hatası verir; `rebuild:clean` bunu önler.)
+</details>
 
 ## ▶️ Çalıştırma
 
@@ -104,8 +130,36 @@ Ayarlar sayfasından:
 npm test
 ```
 
-`test/` altındaki birim testleri (`node --test`) tarayıcı/AD yardımcı fonksiyonlarını ve
-toner tüketim hesaplarını dış bağımlılık olmadan doğrular.
+`test/` altındaki birim testleri (`node --test`) tarayıcı/AD yardımcı fonksiyonlarını,
+toner tüketim hesaplarını, Excel dışa aktarmayı ve jeton doğrulamasını dış bağımlılık
+olmadan doğrular.
+
+> Testler, `better-sqlite3` ile aynı ABI'yi kullanmak için Electron çalıştırıcısı
+> altında koşar (`ELECTRON_RUN_AS_NODE=1`). Electron kurulu değilse otomatik olarak
+> düz `node`'a düşer. Doğrudan Node ile denemek için: `npm run test:node`.
+
+## 🧮 Stok Simülasyonu (demo verisi)
+
+Boş bir kurulumda stok/maliyet ekranlarını doldurmak için, ağdaki **gerçek**
+yazıcı okumalarından (`printer_readings`) geriye dönük tüketim türetilebilir:
+
+```bash
+node scripts/seed-stock.js            # üret
+node scripts/seed-stock.js --temizle  # tamamen geri al
+```
+
+> ⚠️ **Bu veri simülasyondur.** Yazıcı modelleri, seri numaraları ve sayfa
+> sayaçları gerçektir; ancak **kartuş değişim tarihleri ve stok hareketleri
+> sayfa sayaçlarından türetilmiş tahminlerdir** — fiili satın alma kayıtları
+> değildir. Üretilen her satır `note` alanında `[SIM]` ile, `actor` alanında
+> `sistem(simülasyon)` ile damgalanır; böylece gerçek kayıtlardan ayırt
+> edilebilir ve `--temizle` ile eksiksiz silinebilir.
+>
+> Gerçek stok takibine geçerken önce `--temizle` çalıştırın.
+
+Hesaplama yöntemi: `kartuş = ömür_sayfa ÷ kartuş_verimi × renk_faktörü`
+(renkli kartuşlar için %35 kapsama varsayımı). Fiyatlar 2025 Türkiye piyasası
+orijinal kartuş ortalamalarıdır — kendi tedarikçi fiyatlarınızla güncelleyin.
 
 ## 📦 Paketleme
 
@@ -133,10 +187,11 @@ npm run build:linux   # Linux
 | `scanner.js` | TCP port taraması ile yazıcı keşfi |
 | `snmp-query.js` | SNMP (v2c/v3) ile yazıcı bilgisi çekme |
 | `db.js` | SQLite şema, migration, şifreli ayar desteği, denetim kaydı |
-| `auth.js` | Kimlik doğrulama, oturum, RBAC, kullanıcı yönetimi |
+| `auth.js` | Kimlik doğrulama, Bearer jeton katmanı, oturum, RBAC, kullanıcı yönetimi |
 | `readings.js` | Yazıcı okuma geçmişi + toner tüketim hesabı |
 | `ad.js` / `ad-utils.js` | Active Directory / LDAP + klasör ACL çözümleme + WinRM envanter toplama |
 | `inventory.js` | Kullanıcı bazlı IT cihaz/yazılım envanteri (AD / WinRM / manuel) |
+| `toner-export.js` | Toner/stok verisinden `Toner_Takip.xlsx` biçiminde 5 sayfalık Excel üretimi |
 | `index.html`, `js/*.js`, `style.css` | Arayüz — `core` / `printers-ui` / `settings-ui` / `pages-ui` / `ad-ui` modülleri |
 | `test/` | Birim testleri (`node --test`) |
 | `test-ad/` | Docker tabanlı Samba AD DC test ortamı |

@@ -63,16 +63,86 @@ const sessionMiddleware = session({
     cookie: { httpOnly: true, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 8 } // 8 saat
 });
 
+// ============================================
+// BEARER TOKEN KATMANI (ISO A.5.17 / A.8.5)
+// Girişte rastgele 256-bit jeton üretilir; istemciye yalnızca bir kez
+// ham hali verilir, veritabanında SHA-256 özeti saklanır. Jeton süreli
+// ve iptal edilebilirdir (çıkışta / parola değişiminde silinir).
+// ============================================
+const TOKEN_TTL_MS = 8 * 60 * 60 * 1000; // 8 saat — oturum çerezi ile aynı
+
+function hashToken(raw) {
+    return crypto.createHash('sha256').update(String(raw)).digest('hex');
+}
+
+// Süresi dolmuş jetonları temizle (her doğrulamada ucuz bir bakım)
+function purgeExpiredTokens() {
+    db.prepare("DELETE FROM auth_tokens WHERE expires_at <= datetime('now')").run();
+}
+
+function issueToken(userId, ip) {
+    const raw = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + TOKEN_TTL_MS).toISOString().replace('T', ' ').slice(0, 19);
+    db.prepare(`INSERT INTO auth_tokens (token_hash, user_id, expires_at, ip)
+                VALUES (?, ?, ?, ?)`).run(hashToken(raw), userId, expiresAt, ip || '');
+    return { token: raw, expiresAt };
+}
+
+function revokeToken(raw) {
+    if (!raw) return false;
+    return db.prepare('DELETE FROM auth_tokens WHERE token_hash = ?').run(hashToken(raw)).changes > 0;
+}
+
+function revokeAllTokensForUser(userId) {
+    return db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').run(userId).changes;
+}
+
+// Authorization: Bearer <token> başlığından ham jetonu çıkarır
+function extractBearer(req) {
+    const h = req.headers.authorization || '';
+    const m = /^Bearer\s+(.+)$/i.exec(h.trim());
+    return m ? m[1].trim() : null;
+}
+
+// Jetonu doğrular; geçerliyse kullanıcıyı döndürür, aksi halde null.
+function resolveTokenUser(req) {
+    const raw = extractBearer(req);
+    if (!raw) return null;
+    purgeExpiredTokens();
+    const row = db.prepare(`
+        SELECT t.id AS token_id, u.id, u.username, u.role, u.must_change_password
+        FROM auth_tokens t JOIN app_users u ON u.id = t.user_id
+        WHERE t.token_hash = ? AND t.expires_at > datetime('now')
+    `).get(hashToken(raw));
+    if (!row) return null;
+    db.prepare("UPDATE auth_tokens SET last_used_at = datetime('now') WHERE id = ?").run(row.token_id);
+    return {
+        id: row.id, username: row.username, role: row.role,
+        mustChangePassword: !!row.must_change_password
+    };
+}
+
+// Her istekte önce Bearer jetonu, yoksa oturum çerezi değerlendirilir.
+// Böylece mevcut çerez tabanlı akış bozulmadan token desteği eklenir.
+function authenticate(req, res, next) {
+    if (!req.authUser) {
+        const tokenUser = resolveTokenUser(req);
+        if (tokenUser) req.authUser = tokenUser;
+        else if (req.session && req.session.user) req.authUser = req.session.user;
+    }
+    next();
+}
+
 // --- Middleware'ler ---
 function requireAuth(req, res, next) {
-    if (req.session && req.session.user) return next();
+    if (currentUser(req)) return next();
     return res.status(401).json({ error: 'Oturum açılmamış.' });
 }
 
 function requireRole(...roles) {
     const minAllowed = Math.min(...roles.map(r => ROLE_LEVEL[r] || 99));
     return (req, res, next) => {
-        const user = req.session && req.session.user;
+        const user = currentUser(req);
         if (!user) return res.status(401).json({ error: 'Oturum açılmamış.' });
         if ((ROLE_LEVEL[user.role] || 0) >= minAllowed) return next();
         audit({
@@ -83,7 +153,11 @@ function requireRole(...roles) {
     };
 }
 
+// Geçerli kullanıcı: önce Bearer jetonuyla çözülen kimlik, yoksa oturum çerezi.
 function currentUser(req) {
+    if (req.authUser) return req.authUser;
+    const tokenUser = resolveTokenUser(req);
+    if (tokenUser) { req.authUser = tokenUser; return tokenUser; }
     return (req.session && req.session.user) || null;
 }
 
@@ -111,17 +185,24 @@ function attachAuthRoutes(app) {
 
         clearLoginFailures(uname);
         req.session.user = { id: row.id, username: row.username, role: row.role, mustChangePassword: !!row.must_change_password };
-        audit({ actor: row.username, action: 'login', entity: 'auth', ip });
+        // Bearer jetonu üret — istemci sonraki isteklerde Authorization başlığıyla gönderir
+        const { token, expiresAt } = issueToken(row.id, ip);
+        audit({ actor: row.username, action: 'login', entity: 'auth', detail: 'jeton verildi', ip });
         res.json({
             user: req.session.user,
+            token,
+            expiresAt,
             mustChangePassword: !!row.must_change_password
         });
     });
 
     app.post('/api/logout', (req, res) => {
         const user = currentUser(req);
+        // Kullanılan jetonu iptal et (yalnız bu oturum düşer)
+        revokeToken(extractBearer(req));
         if (user) audit({ actor: user.username, action: 'logout', entity: 'auth', ip: clientIp(req) });
-        req.session.destroy(() => res.json({ ok: true }));
+        if (req.session) req.session.destroy(() => res.json({ ok: true }));
+        else res.json({ ok: true });
     });
 
     app.get('/api/me', (req, res) => {
@@ -143,9 +224,16 @@ function attachAuthRoutes(app) {
         }
         const hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
         db.prepare('UPDATE app_users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, me.id);
-        if (req.session.user) req.session.user.mustChangePassword = false; // kapı middleware'i için bayrağı temizle
-        audit({ actor: me.username, action: 'change_password', entity: 'user', entity_id: me.id, ip: clientIp(req) });
-        res.json({ ok: true });
+        if (req.session && req.session.user) req.session.user.mustChangePassword = false; // kapı middleware'i için bayrağı temizle
+        if (req.authUser) req.authUser.mustChangePassword = false;
+
+        // Parola değişti → eski jetonların tamamı iptal, yerine tek yeni jeton.
+        // Çalınmış bir jeton parola değişimiyle geçersiz kalır (ISO A.8.5).
+        revokeAllTokensForUser(me.id);
+        const { token, expiresAt } = issueToken(me.id, clientIp(req));
+
+        audit({ actor: me.username, action: 'change_password', entity: 'user', entity_id: me.id, detail: 'jetonlar yenilendi', ip: clientIp(req) });
+        res.json({ ok: true, token, expiresAt });
     });
 
     // --- Kullanıcı yönetimi (yalnız admin) ---
@@ -182,7 +270,9 @@ function attachAuthRoutes(app) {
         if (password) {
             const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
             db.prepare('UPDATE app_users SET password_hash = ?, must_change_password = 1 WHERE id = ?').run(hash, id);
+            revokeAllTokensForUser(id); // parola sıfırlandı → açık oturumları düşür
         }
+        if (role && role !== row.role) revokeAllTokensForUser(id); // rol değişti → yeniden giriş şart
         audit({ actor: currentUser(req).username, action: 'update', entity: 'user', entity_id: id, ip: clientIp(req) });
         res.json({ ok: true });
     });
@@ -196,6 +286,7 @@ function attachAuthRoutes(app) {
         if (target && target.role === 'admin' && count <= 1) {
             return res.status(400).json({ error: 'Son yönetici silinemez.' });
         }
+        revokeAllTokensForUser(id); // silinen kullanıcının açık jetonları geçersiz
         db.prepare('DELETE FROM app_users WHERE id = ?').run(id);
         audit({ actor: me.username, action: 'delete', entity: 'user', entity_id: id, ip: clientIp(req) });
         res.json({ ok: true });
@@ -204,9 +295,18 @@ function attachAuthRoutes(app) {
 
 module.exports = {
     sessionMiddleware,
+    authenticate,
     requireAuth,
     requireRole,
     currentUser,
     clientIp,
     attachAuthRoutes,
+    // Jeton yardımcıları (test ve dahili kullanım)
+    issueToken,
+    revokeToken,
+    revokeAllTokensForUser,
+    resolveTokenUser,
+    extractBearer,
+    hashToken,
+    TOKEN_TTL_MS,
 };

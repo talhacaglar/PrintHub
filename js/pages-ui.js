@@ -197,6 +197,36 @@ function downloadCSV(key) {
 }
 
 // ============================================
+// TONER TAKİP EXCEL DIŞA AKTARMA (tek tuş)
+// Sunucu, şirketteki Toner_Takip.xlsx ile birebir aynı yapıda
+// 5 sayfalık çalışma kitabı üretir; burada indirilir.
+// ============================================
+async function downloadTonerExcel(btn) {
+    const original = btn ? btn.innerHTML : null;
+    if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Hazırlanıyor...'; }
+    try {
+        const res = await apiFetch(`${API_BASE}/api/export/toner-excel`);
+        if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            throw new Error(d.error || 'Excel dosyası oluşturulamadı.');
+        }
+        // Dosya adını sunucunun Content-Disposition başlığından al
+        const cd = res.headers.get('Content-Disposition') || '';
+        const m = cd.match(/filename="?([^"]+)"?/);
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = m ? m[1] : 'Toner_Takip.xlsx';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    } catch (e) {
+        alert(e.message || 'Excel dosyası indirilemedi.');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
+    }
+}
+
+// ============================================
 // STOK YÖNETİMİ
 // ============================================
 async function renderStock() {
@@ -262,9 +292,12 @@ async function renderStock() {
             </div>
 
             <div class="settings-card" style="margin-bottom:20px;">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
                     <h3 style="margin:0">Toner Türleri & Stok</h3>
-                    ${canWrite ? `<button class="mini-btn primary" onclick="openTonerTypeForm()">+ Toner Türü Ekle</button>` : ''}
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <button class="mini-btn" onclick="downloadTonerExcel(this)" title="Toner_Takip.xlsx biçiminde tüm toner verisini indir">📊 Toner Takip Excel</button>
+                        ${canWrite ? `<button class="mini-btn primary" onclick="openTonerTypeForm()">+ Toner Türü Ekle</button>` : ''}
+                    </div>
                 </div>
                 <div class="table-container" style="margin-top:14px;">
                     <table class="data-table">

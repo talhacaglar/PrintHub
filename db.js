@@ -37,6 +37,21 @@ function migrate() {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        -- Oturum jetonları (Bearer token). Ham jeton saklanmaz; yalnızca
+        -- SHA-256 özeti tutulur, böylece DB sızsa bile jeton kullanılamaz.
+        -- ISO 27001: A.5.17 Kimlik doğrulama bilgisi, A.8.5 Güvenli kimlik doğrulama.
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+            issued_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            last_used_at TEXT,
+            ip TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_auth_tokens_exp ON auth_tokens(expires_at);
+
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT

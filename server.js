@@ -4,10 +4,11 @@ const { scanNetwork, getSubnetsForCIDR } = require('./scanner');
 const { queryPrinter } = require('./snmp-query');
 
 const { db, getSetting, setSetting, getAllSettings, setSecureSetting, migratePlaintextSecrets, audit } = require('./db');
-const { sessionMiddleware, requireAuth, requireRole, currentUser, clientIp, attachAuthRoutes } = require('./auth');
+const { sessionMiddleware, authenticate, requireAuth, requireRole, currentUser, clientIp, attachAuthRoutes } = require('./auth');
 const readings = require('./readings');
 const ad = require('./ad');
 const inventory = require('./inventory');
+const tonerExport = require('./toner-export');
 
 const app = express();
 const PORT = 3847;
@@ -15,9 +16,16 @@ const HOST = '127.0.0.1'; // Yalnızca yerel makineden erişim — ağa açılma
 
 // CORS: yalnızca uygulamanın kendi origin'i (Electron pencere localhost'tan yüklenir).
 // Ağdaki diğer makinelerden gelen cross-origin istekler reddedilir.
-app.use(cors({ origin: [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`], credentials: true }));
+app.use(cors({
+    origin: [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Disposition']
+}));
 app.use(express.json());
 app.use(sessionMiddleware);
+// Bearer jetonu veya oturum çerezinden kimliği çöz (req.authUser)
+app.use(authenticate);
 app.use(express.static(__dirname)); // HTML/CSS/JS dosyalarını sun (login öncesi gerekli)
 
 // ============================================
@@ -61,7 +69,7 @@ app.use('/api', requireAuth);
 // hiçbir işlem yapamaz (yalnız parola değiştirme / oturum uçları serbest).
 const PW_GATE_ALLOW = ['/change-password', '/logout', '/me'];
 app.use('/api', (req, res, next) => {
-    const user = req.session && req.session.user;
+    const user = currentUser(req);
     if (user && user.mustChangePassword && !PW_GATE_ALLOW.includes(req.path)) {
         return res.status(403).json({ error: 'Devam etmeden önce parolanızı değiştirmelisiniz.', mustChangePassword: true });
     }
@@ -450,6 +458,32 @@ app.get('/api/reports/cost', (req, res) => {
     `).all();
 
     res.json({ byType, monthly, currency: getSetting('currency') || 'TRY' });
+});
+
+// ============================================
+// TONER TAKİP EXCEL DIŞA AKTARMA
+// Tek tuşla, şirketteki Toner_Takip.xlsx ile birebir aynı yapıda
+// 5 sayfalık çalışma kitabı üretir (ISO 27001 A.5.9 / A.8.15).
+// ============================================
+app.get('/api/export/toner-excel', (req, res) => {
+    try {
+        const { buffer, stats } = tonerExport.buildWorkbook();
+        const filename = tonerExport.buildFileName();
+
+        audit({
+            actor: currentUser(req).username, action: 'export', entity: 'toner_excel',
+            detail: `${filename} (${stats.degisim} değişim, ${stats.giris} giriş, ${stats.tonerTypes} toner türü)`,
+            ip: clientIp(req)
+        });
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Length', buffer.length);
+        res.send(buffer);
+    } catch (e) {
+        console.error('[Export] Toner Excel üretilemedi:', e.message);
+        res.status(500).json({ error: 'Excel dosyası oluşturulamadı.' });
+    }
 });
 
 // ============================================
