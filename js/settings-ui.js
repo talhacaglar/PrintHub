@@ -7,8 +7,11 @@ async function loadSettings() {
         const data = await res.json();
         const s = data.settings || {};
         const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+        set("setScanTargets", s.scan_targets);
         set("setBaseIp", s.scan_base_ip);
         set("setCidr", s.scan_cidr);
+        set("setStaleDays", s.printer_stale_days);
+        updateCidrEstimate();
         set("setSnmpCommunity", s.snmp_community);
         set("setSnmpVersion", s.snmp_version || '2c');
         set("setSnmpV3User", s.snmp_v3_user);
@@ -39,6 +42,64 @@ async function loadSettings() {
     } catch (e) { /* ok */ }
 }
 
+// Bir CIDR maskesinin kaç /24 içerdiğini verir (scanner.js ile aynı kural:
+// /24 ve dar maskeler tek subnet).
+function subnetCountForBits(bits) {
+    if (!Number.isInteger(bits) || bits < 4 || bits > 32) return 0;
+    return bits >= 24 ? 1 : Math.pow(2, 24 - bits);
+}
+
+// Tarama maliyetini (IP sayısı + kaba süre) canlı gösterir.
+// Tarayıcı 80 IP'yi paralel, ~0.8 sn timeout ile dener → ~100 IP/sn üst sınır.
+// Hedef listesi doluysa maliyet listeden, boşsa taban IP + maskeden hesaplanır.
+function updateCidrEstimate() {
+    const el = document.getElementById("cidrEstimate");
+    const sel = document.getElementById("setCidr");
+    if (!el || !sel) return;
+
+    const targets = (document.getElementById("setScanTargets")?.value || '').trim();
+    let subnets = 0;
+    let kaynak = '';
+
+    if (targets) {
+        // scanner.js parseScanTargets ile aynı ayrıştırma; burada yalnızca sayılır
+        let gecersiz = 0;
+        for (const raw of targets.split(/[,;\n\r]+/)) {
+            const t = raw.trim();
+            if (!t) continue;
+            const bits = t.includes('/') ? parseInt(t.slice(t.indexOf('/') + 1), 10) : 24;
+            const n = subnetCountForBits(bits);
+            if (n === 0) gecersiz++; else subnets += n;
+        }
+        kaynak = `${targets.split(/[,;\n\r]+/).filter(t => t.trim()).length} hedef`
+            + (gecersiz ? `, ${gecersiz} geçersiz satır atlanacak` : '');
+    } else {
+        subnets = subnetCountForBits(parseInt(sel.value, 10));
+        kaynak = 'taban IP + maske';
+    }
+
+    if (subnets === 0) {
+        el.style.color = 'var(--status-warning, #e0a800)';
+        el.textContent = '⚠️ Geçerli tarama hedefi yok — tarama başlatılamaz.';
+        return;
+    }
+
+    const ips = subnets * 254;
+    const seconds = ips / 100; // kaba: ~100 IP/sn
+
+    let sure;
+    if (seconds < 90) sure = `${Math.round(seconds)} saniye`;
+    else if (seconds < 5400) sure = `~${Math.round(seconds / 60)} dakika`;
+    else if (seconds < 172800) sure = `~${(seconds / 3600).toFixed(1)} saat`;
+    else sure = `~${Math.round(seconds / 86400)} gün`;
+
+    const agir = subnets > 4096;
+    el.style.color = agir ? 'var(--status-warning, #e0a800)' : '';
+    el.textContent = `${kaynak}: ${subnets.toLocaleString('tr-TR')} subnet, `
+        + `${ips.toLocaleString('tr-TR')} IP taranacak — tahmini süre ${sure}.`
+        + (agir ? ' ⚠️ Bu kadar geniş bir tarama pratikte bitmeyebilir; taramayı ilerleme çubuğundaki "Durdur" ile kesebilirsiniz.' : '');
+}
+
 // SNMP sürüm seçimine göre v2c/v3 alanlarını göster/gizle
 function toggleSnmpV3Fields() {
     const isV3 = document.getElementById("setSnmpVersion")?.value === '3';
@@ -50,8 +111,10 @@ function toggleSnmpV3Fields() {
 
 async function saveGeneralSettings() {
     const body = {
+        scan_targets: document.getElementById("setScanTargets")?.value.trim() || '',
         scan_base_ip: document.getElementById("setBaseIp").value.trim(),
         scan_cidr: document.getElementById("setCidr").value,
+        printer_stale_days: document.getElementById("setStaleDays")?.value || '0',
         snmp_community: document.getElementById("setSnmpCommunity").value.trim() || 'public',
         snmp_version: document.getElementById("setSnmpVersion")?.value || '2c',
         snmp_v3_user: document.getElementById("setSnmpV3User")?.value.trim() || '',

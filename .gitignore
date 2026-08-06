@@ -29,3 +29,6 @@ Thumbs.db
 
 # Windows Server VM disk imaji (60+ GB) — asla commitlenmemeli
 test-ad/windows-server/storage/
+
+# Uygulama nohup ile calistirildiginda olusur
+nohup.out

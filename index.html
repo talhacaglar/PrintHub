@@ -112,6 +112,11 @@
             <div class="scan-progress-info">
                 <span class="material-icons-round spinning">radar</span>
                 <span id="scanStatusText">Ağ taranıyor...</span>
+                <button class="topbar-btn" id="scanStopBtn" title="Taramayı Durdur"
+                        style="width:auto; padding:0 12px; gap:6px; margin-left:auto;">
+                    <span class="material-icons-round">stop_circle</span>
+                    <span>Durdur</span>
+                </button>
             </div>
             <div class="scan-progress-track">
                 <div class="scan-progress-fill" id="scanProgressFill" style="width:0%"></div>
@@ -311,19 +316,56 @@
                 <div class="settings-card">
                     <h3>Ağ Tarama Ayarları</h3>
                     <div class="form-group">
-                        <label>IP Aralığı / Base IP</label>
+                        <label>Tarama Hedefleri (önerilen)</label>
+                        <textarea id="setScanTargets" class="form-input" rows="3"
+                                  oninput="updateCidrEstimate()"
+                                  placeholder="192.168.2.0/24, 10.1.5.0/24&#10;172.16.8.0/22"></textarea>
+                        <small class="pw-hint" style="display:block; margin-top:6px; line-height:1.5;">
+                            Virgül veya satırla ayrılmış CIDR listesi. Yalnızca yazıcıların
+                            bulunduğu ağları yazın — tek taban IP + maske yalnızca <b>bitişik</b>
+                            bir blok tarayabildiği için dağınık VLAN'lar kapsanamıyordu.
+                            Boş bırakılırsa aşağıdaki taban IP / maske kullanılır.
+                        </small>
+                    </div>
+                    <div class="form-group">
+                        <label>IP Aralığı / Base IP <small class="pw-hint">(hedef listesi boşsa)</small></label>
                         <input type="text" id="setBaseIp" value="192.168.2.18" class="form-input">
                     </div>
                     <div class="form-group">
-                        <label>CIDR Maskesi</label>
-                        <select id="setCidr" class="form-input">
+                        <label>CIDR Maskesi <small class="pw-hint">(hedef listesi boşsa)</small></label>
+                        <select id="setCidr" class="form-input" onchange="updateCidrEstimate()">
                             <option value="25">/25 (126 IP)</option>
                             <option value="24">/24 (254 IP, Tek Subnet)</option>
                             <option value="23">/23 (510 IP, 2 Subnet)</option>
                             <option value="22" selected>/22 (1022 IP, 4 Subnet)</option>
                             <option value="21">/21 (2046 IP, 8 Subnet)</option>
                             <option value="20">/20 (4094 IP, 16 Subnet)</option>
+                            <option value="19">/19 (8190 IP, 32 Subnet)</option>
+                            <option value="18">/18 (16K IP, 64 Subnet)</option>
+                            <option value="17">/17 (32K IP, 128 Subnet)</option>
+                            <option value="16">/16 (65K IP, 256 Subnet)</option>
+                            <option value="15">/15 (131K IP, 512 Subnet)</option>
+                            <option value="14">/14 (262K IP, 1K Subnet)</option>
+                            <option value="13">/13 (524K IP, 2K Subnet)</option>
+                            <option value="12">/12 (1M IP, 4K Subnet)</option>
+                            <option value="11">/11 (2M IP, 8K Subnet)</option>
+                            <option value="10">/10 (4M IP, 16K Subnet)</option>
+                            <option value="9">/9 (8M IP, 32K Subnet)</option>
+                            <option value="8">/8 (16M IP, 64K Subnet)</option>
+                            <option value="7">/7 (33M IP, 128K Subnet)</option>
+                            <option value="6">/6 (67M IP, 256K Subnet)</option>
+                            <option value="5">/5 (134M IP, 512K Subnet)</option>
+                            <option value="4">/4 (268M IP, 1M Subnet) — ÇOK YAVAŞ!</option>
                         </select>
+                        <small class="pw-hint" id="cidrEstimate" style="display:block; margin-top:6px; line-height:1.5;"></small>
+                    </div>
+                    <div class="form-group">
+                        <label>Eskiyen Kayıtları Düşür (gün)</label>
+                        <input type="number" id="setStaleDays" min="0" max="3650" value="30" class="form-input">
+                        <small class="pw-hint" style="display:block; margin-top:6px; line-height:1.5;">
+                            Bu kadar gündür SNMP/port cevabı vermeyen yazıcı kaydı tarama
+                            sonunda listeden düşer. <b>0 = kapalı</b> (kayıtlar sonsuza kadar birikir).
+                        </small>
                     </div>
                     <div class="form-group">
                         <label>SNMP Sürümü</label>

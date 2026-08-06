@@ -1,7 +1,9 @@
 const express = require('express');
 const cors = require('cors');
-const { scanNetwork, getSubnetsForCIDR } = require('./scanner');
+const { scanNetwork, getSubnetsForCIDR, parseScanTargets, scanHost } = require('./scanner');
 const { queryPrinter } = require('./snmp-query');
+
+const { mergeScanResults, pruneStalePrinters } = require('./printer-identity');
 
 const { db, getSetting, setSetting, getAllSettings, setSecureSetting, migratePlaintextSecrets, audit } = require('./db');
 const { sessionMiddleware, authenticate, requireAuth, requireRole, currentUser, clientIp, attachAuthRoutes } = require('./auth');
@@ -11,7 +13,9 @@ const inventory = require('./inventory');
 const tonerExport = require('./toner-export');
 
 const app = express();
-const PORT = 3847;
+// PRINTHUB_PORT yalnızca test/geliştirme içindir; üretimde ayarlanmaz ve
+// Electron penceresi 3847'yi yükler.
+const PORT = parseInt(process.env.PRINTHUB_PORT, 10) || 3847;
 const HOST = '127.0.0.1'; // Yalnızca yerel makineden erişim — ağa açılmaz
 
 // CORS: yalnızca uygulamanın kendi origin'i (Electron pencere localhost'tan yüklenir).
@@ -48,6 +52,12 @@ function snmpCommunity() {
 }
 
 let discoveredPrinters = [];
+let scanAborted = false; // /api/scan/stop ile true olur; tarayıcı döngüsü kontrol eder
+// Arka plan yenilemesi (açılış + oto-yenileme) taramadan ayrı izlenir:
+// yenileme SNMP'siz cihazlarda dakikalarca sürebiliyor ve bu süre boyunca
+// kullanıcının "Ağı Tara" isteğini bloklamamalı — tarama yenilemeyi önceler.
+let refreshing = false;
+let refreshAbort = false;
 let scanStatus = {
     scanning: false,
     progress: 0,
@@ -150,17 +160,113 @@ async function mapConcurrent(items, limit, fn) {
     return results.filter(r => r !== undefined);
 }
 
+// ============================================
+// YAZICI KİMLİĞİ VE TARAMA BİRLEŞTİRME
+// Saf mantık printer-identity.js'de (test edilebilir); DB'ye dokunan
+// yan etkiler burada.
+// ============================================
+
+/**
+ * Bir yazıcının IP'si değiştiğinde IP ile anahtarlanmış yan tabloları taşır;
+ * demirbaş kaydı ve sayaç geçmişi kopmasın diye.
+ */
+function migratePrinterIp(oldIp, newIp) {
+    const target = db.prepare('SELECT 1 FROM printer_assets WHERE printer_ip = ?').get(newIp);
+
+    const tx = db.transaction(() => {
+        // Hedef IP'de zaten bir demirbaş kaydı varsa üzerine yazma —
+        // o kayıt başka bir cihaza ait olabilir.
+        if (!target) {
+            db.prepare('UPDATE printer_assets SET printer_ip = ? WHERE printer_ip = ?').run(newIp, oldIp);
+        }
+        db.prepare('UPDATE printer_readings SET printer_ip = ? WHERE printer_ip = ?').run(newIp, oldIp);
+        db.prepare('DELETE FROM known_printers WHERE printer_ip = ?').run(oldIp);
+    });
+    tx();
+
+    audit({
+        actor: 'system', action: 'printer_ip_change', entity: 'printer', entity_id: newIp,
+        detail: target
+            ? `${oldIp} → ${newIp} (hedef IP'de demirbaş kaydı vardı, taşınmadı)`
+            : `${oldIp} → ${newIp}`
+    });
+}
+
+/**
+ * Bir koşul sağlanana kadar (ya da zaman aşımına kadar) bekler.
+ * @returns {Promise<boolean>} koşul sağlandıysa true
+ */
+function waitUntil(cond, timeoutMs, stepMs = 200) {
+    return new Promise((resolve) => {
+        const deadline = Date.now() + timeoutMs;
+        const tick = () => {
+            if (cond()) return resolve(true);
+            if (Date.now() >= deadline) return resolve(false);
+            setTimeout(tick, stepMs);
+        };
+        tick();
+    });
+}
+
+/**
+ * printer_stale_days ayarını uygular ve düşürülen kayıtları denetim loguna yazar.
+ */
+function pruneStale(list) {
+    const days = parseInt(getSetting('printer_stale_days'), 10) || 0;
+    const { kept, dropped } = pruneStalePrinters(list, days);
+
+    if (dropped.length > 0) {
+        audit({
+            actor: 'system', action: 'prune', entity: 'printer',
+            detail: `${days} gündür cevap vermeyen ${dropped.length} kayıt düşürüldü: `
+                + dropped.map(p => p.ip).join(', ').slice(0, 500)
+        });
+        console.log(`[Budama] ${dropped.length} eskiyen yazıcı kaydı düşürüldü (eşik: ${days} gün).`);
+    }
+    return kept;
+}
+
 app.post('/api/scan', requireRole('operator'), async (req, res) => {
     if (scanStatus.scanning) {
-        return res.status(409).json({ error: 'Tarama zaten devam ediyor.' });
+        // Gerçekten bir tarama sürüyorsa reddet; ama arka plan yenilemesi
+        // (açılışta 50 yazıcı × SNMP timeout = dakikalar) kullanıcının
+        // taramasını bloklamamalı — yenilemeyi durdurup devam ederiz.
+        if (!refreshing) {
+            return res.status(409).json({ error: 'Tarama zaten devam ediyor.' });
+        }
+
+        refreshAbort = true;
+        scanStatus.message = 'Arka plan yenilemesi durduruluyor...';
+        const durdu = await waitUntil(() => !refreshing, 20000);
+        if (!durdu) {
+            return res.status(409).json({
+                error: 'Arka plan yenilemesi durdurulamadı; birkaç saniye sonra tekrar deneyin.'
+            });
+        }
     }
 
-    const baseIp = req.body.baseIp || getSetting('scan_base_ip') || '192.168.2.18';
-    const cidr = req.body.cidr || getSetting('scan_cidr') || '22';
     const start = parseInt(req.body.start) || 1;
     const end = parseInt(req.body.end) || 254;
 
-    const subnets = getSubnetsForCIDR(baseIp, cidr);
+    // Serbest hedef listesi (birden çok, bitişik olmayan aralık) önceliklidir;
+    // boşsa eski taban IP + maske yoluna düşülür.
+    const targets = (req.body.targets != null ? req.body.targets : getSetting('scan_targets')) || '';
+    const baseIp = req.body.baseIp || getSetting('scan_base_ip') || '192.168.2.18';
+    const cidr = req.body.cidr || getSetting('scan_cidr') || '22';
+
+    const subnets = String(targets).trim()
+        ? parseScanTargets(targets)
+        : getSubnetsForCIDR(baseIp, cidr);
+    const scope = String(targets).trim() ? String(targets).trim() : `${baseIp}/${cidr}`;
+
+    // Geçersiz hedef → total 0 olur ve ilerleme NaN'a döner; hiç başlatma.
+    if (subnets.length === 0) {
+        scanStatus = {
+            scanning: false, progress: 0, total: 0, scanned: 0, found: 0,
+            message: 'Geçersiz tarama hedefi — ayarlardaki IP/CIDR değerlerini kontrol edin.'
+        };
+        return res.status(400).json({ error: scanStatus.message });
+    }
 
     scanStatus = {
         scanning: true, progress: 0,
@@ -168,29 +274,40 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
         scanned: 0, found: 0, message: 'Ağ taranıyor...'
     };
 
-    audit({ actor: currentUser(req).username, action: 'scan', entity: 'network', detail: `${baseIp}/${cidr}`, ip: clientIp(req) });
-    res.json({ message: 'Tarama başlatıldı.', subnets, total: scanStatus.total });
+    scanAborted = false;
+
+    audit({ actor: currentUser(req).username, action: 'scan', entity: 'network', detail: scope, ip: clientIp(req) });
+    // subnets listesi geniş maskelerde milyon satır olabilir — yanıtta sayısı yeter
+    res.json({ message: 'Tarama başlatıldı.', subnetCount: subnets.length, total: scanStatus.total });
 
     try {
-        const hosts = await scanNetwork({
-            subnets, start, end,
+        const snmpOpts = snmpCommunity();
+        const { found: hosts, summary } = await scanNetwork({
+            subnets, start, end, snmpOpts,
+            shouldStop: () => scanAborted,
             onProgress: (scanned, total, found) => {
                 scanStatus.scanned = scanned;
                 scanStatus.total = total;
                 scanStatus.found = found;
-                scanStatus.progress = Math.round((scanned / total) * 100);
-                scanStatus.message = `Taranıyor... ${scanned}/${total} IP (${found} yazıcı bulundu)`;
+                scanStatus.progress = total > 0 ? Math.round((scanned / total) * 100) : 0;
+                // "aday" = portu açık VEYA SNMP'ye cevap veren her cihaz.
+                // Yazıcı olup olmadığı SNMP aşamasından sonra belirlenir, bu
+                // yüzden sayı nihai yazıcı sayısından yüksek olur; tarama
+                // ilerledikçe de kümülatif arttığı açıkça yazılır.
+                scanStatus.message = `Taranıyor... ${scanned}/${total} IP `
+                    + `— şu ana dek ${found} cihaz yanıt verdi (yazıcı ayıklaması sonra)`;
             }
         });
 
         scanStatus.message = `${hosts.length} cihaza SNMP sorgusu yapılıyor...`;
 
         // SNMP sorguları 6'lı gruplar halinde paralel (en büyük hız kazancı)
-        const results = await mapConcurrent(hosts, 6, async (host) => {
+        const queried = await mapConcurrent(hosts, 6, async (host) => {
             scanStatus.message = `SNMP sorgulanıyor: ${host.ip}`;
             try {
-                const info = await queryPrinter(host.ip, snmpCommunity());
+                const info = await queryPrinter(host.ip, snmpOpts);
                 info.openPorts = host.ports;
+                info.snmpOpen = host.snmpOpen;
                 return info;
             } catch (e) {
                 return {
@@ -199,34 +316,56 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
                     location: 'Bilinmiyor', status: 'online', statusText: 'Çevrim İçi',
                     serialNumber: '', firmware: '', toner: { black: -1 }, paperTrays: [],
                     queue: [], totalPrinted: 0, monthlyPrinted: 0, lastSeen: 'Şimdi',
-                    snmpAvailable: false, openPorts: host.ports
+                    snmpAvailable: false, printerMib: false,
+                    openPorts: host.ports, snmpOpen: host.snmpOpen
                 };
             }
         });
 
-        // Taramada bulunamayan ama önceden bilinen yazıcılar "çevrimdışı" olarak korunur
-        const foundIps = new Set(results.map(r => r.ip));
-        const offline = discoveredPrinters
-            .filter(p => !foundIps.has(p.ip))
-            .map(p => ({
-                ...p, status: 'offline', statusText: 'Çevrim Dışı',
-                lastSeen: p.lastSeen === 'Şimdi' ? new Date().toISOString() : p.lastSeen,
-                snmpAvailable: false, queue: []
-            }));
+        // Yanlış pozitif filtresi: SNMP'ye her yönetilebilir switch/sunucu cevap
+        // verir. Yazıcı portu AÇIK olmayıp yalnızca SNMP ile bulunan adaylar
+        // ancak Printer MIB'e cevap veriyorsa listeye alınır.
+        const results = queried.filter(p => (p.openPorts || []).length > 0 || p.printerMib);
+        const rejected = queried.length - results.length;
 
-        discoveredPrinters = [...results, ...offline].map((p, i) => ({ ...p, id: i + 1 }));
+        discoveredPrinters = mergeScanResults(discoveredPrinters, results, migratePrinterIp);
+        // Yarım kalan tarama yüzünden kayıt silinmesin
+        if (!scanAborted) discoveredPrinters = pruneStale(discoveredPrinters);
 
         readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi kaydı
         saveKnownPrinters();                    // yeniden açılışta hatırlanır
 
+        // Kapsam teşhisi: "128 subnetin 121'i boş" bilgisi, taramanın gerçekten
+        // doğru aralıkları hedefleyip hedeflemediğini tek bakışta gösterir.
+        console.log(`[Tarama] ${scope} — ${summary.started}/${summary.subnets} subnet tarandı, `
+            + `${summary.withHits} tanesinde sonuç var, ${summary.empty} tanesi boş. `
+            + `${results.length} yazıcı (${rejected} SNMP adayı yazıcı değil diye elendi).`);
+
         scanStatus = {
             scanning: false, progress: 100, total: scanStatus.total,
             scanned: scanStatus.total, found: discoveredPrinters.length,
-            message: `Tarama tamamlandı. ${discoveredPrinters.length} yazıcı bulundu.`
+            subnetSummary: summary,
+            message: (scanAborted ? 'Tarama durduruldu. ' : 'Tarama tamamlandı. ')
+                + `${queried.length} cihaz yanıt verdi, ${results.length}'i yazıcı `
+                + `(${rejected} tanesi yazıcı değil diye elendi). `
+                + `Liste: ${discoveredPrinters.length} kayıt, `
+                + `${summary.withHits}/${summary.started} subnette sonuç var.`
         };
     } catch (e) {
         scanStatus = { scanning: false, progress: 0, total: 0, scanned: 0, found: 0, message: `Tarama hatası: ${e.message}` };
+    } finally {
+        scanAborted = false;
     }
+});
+
+// Devam eden taramayı durdurur — geniş maskelerde (/8, /4) tarama günler
+// sürebileceği için kullanıcı elde edilen sonuçla erken bitirebilmeli.
+app.post('/api/scan/stop', requireRole('operator'), (req, res) => {
+    if (!scanStatus.scanning) return res.json({ message: 'Devam eden tarama yok.' });
+    scanAborted = true;
+    scanStatus.message = 'Tarama durduruluyor...';
+    audit({ actor: currentUser(req).username, action: 'scan_stop', entity: 'network', ip: clientIp(req) });
+    res.json({ message: 'Tarama durduruluyor.' });
 });
 
 // ============================================
@@ -235,12 +374,22 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
 // tarama beklemeden bilinen IP'ler otomatik sorgulanır.
 // ============================================
 function saveKnownPrinters() {
+    // printer_ip birincil anahtar: aynı IP iki kez gelirse düz INSERT tüm
+    // transaction'ı devirirdi. Kimlik birleştirmesinden sonra bu olmamalı,
+    // ama kayıt sessizce kaybolmasın diye son bir güvenlik ağı.
+    const byIp = new Map();
+    for (const p of discoveredPrinters) {
+        if (p && p.ip) byIp.set(p.ip, p);
+    }
+
     const tx = db.transaction(() => {
         db.prepare('DELETE FROM known_printers').run();
-        const ins = db.prepare(`INSERT INTO known_printers (printer_ip, name, model, open_ports, last_seen)
-                                VALUES (?, ?, ?, ?, datetime('now'))`);
-        for (const p of discoveredPrinters) {
-            ins.run(p.ip, p.name || '', p.model || '', JSON.stringify(p.openPorts || []));
+        const ins = db.prepare(`INSERT OR REPLACE INTO known_printers
+                                (printer_ip, name, model, open_ports, serial_number, mac, first_seen, last_online, last_seen)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`);
+        for (const p of byIp.values()) {
+            ins.run(p.ip, p.name || '', p.model || '', JSON.stringify(p.openPorts || []),
+                p.serialNumber || '', p.mac || '', p.firstSeen || '', p.lastOnline || '');
         }
     });
     tx();
@@ -253,13 +402,18 @@ function loadKnownPrinters() {
         ip: r.printer_ip,
         name: r.name || `Yazıcı (${r.printer_ip})`,
         model: r.model || '',
-        type: 'laser', color: false, mac: '',
+        type: 'laser', color: false,
+        mac: r.mac || '',
         location: 'Bilinmiyor',
         status: 'offline', statusText: 'Sorgulanıyor...',
-        serialNumber: '', firmware: '',
+        serialNumber: r.serial_number || '', firmware: '',
         toner: { black: -1 }, paperTrays: [], queue: [],
         totalPrinted: 0, monthlyPrinted: 0,
         lastSeen: r.last_seen, snmpAvailable: false,
+        firstSeen: r.first_seen || r.last_seen || '',
+        // last_online yoksa (bu kolondan önceki kurulumlar) last_seen'e düş —
+        // aksi halde budama tüm eski kayıtları bir anda silerdi.
+        lastOnline: r.last_online || r.last_seen || '',
         openPorts: safeJson(r.open_ports)
     }));
 }
@@ -269,31 +423,83 @@ function safeJson(s) { try { return JSON.parse(s) || []; } catch { return []; } 
 // Tüm bilinen yazıcıları yeniden sorgular (manuel yenileme + otomatik zamanlayıcı ortak yolu)
 // SNMP sorguları 6'lı gruplar halinde paralel çalışır.
 async function refreshAllPrinters() {
+    refreshing = true;
+    refreshAbort = false;
     scanStatus.scanning = true;
     scanStatus.message = 'Yazıcılar yenileniyor...';
 
     let done = 0;
-    await mapConcurrent(discoveredPrinters.map((p, i) => ({ p, i })), 6, async ({ p, i }) => {
+    const targets = discoveredPrinters.slice();
+    const total = targets.length;
+
+    try {
+    await mapConcurrent(targets, 6, async (p) => {
+        // Kullanıcı tarama başlattıysa yenilemeyi bırak — sıradaki yazıcılar
+        // atlanır, o ana kadar toplananlar korunur.
+        if (refreshAbort) return true;
+        // Yakalanmış indeksle yazmak, tarama diziyi bu sırada değiştirirse
+        // yanlış slota yazıp kopya IP üretiyordu — her seferinde IP'den bul.
+        const at = () => discoveredPrinters.findIndex(x => x.ip === p.ip);
         try {
             const info = await queryPrinter(p.ip, snmpCommunity());
-            info.id = p.id;
-            info.openPorts = p.openPorts;
-            discoveredPrinters[i] = info;
+            const i = at();
+            if (i >= 0) {
+                // queryPrinter, SNMP tamamen sessiz kalsa da hata fırlatmaz —
+                // snmpAvailable:false olan bir nesne döner. Bunu "görüldü"
+                // saymak fişi çekilmiş cihazı "Çevrim İçi (SNMP Kapalı)"
+                // gösteriyor ve lastOnline'ı tazeleyip budamayı etkisiz
+                // kılıyordu. SNMP sessizse erişimi TCP porttan teyit et.
+                let erisildi = info.snmpAvailable;
+                if (!erisildi) {
+                    const tcp = await scanHost(p.ip);
+                    erisildi = tcp !== null;
+                    if (erisildi) {
+                        info.openPorts = tcp.ports;
+                        info.status = 'online';
+                        info.statusText = 'Çevrim İçi (SNMP Kapalı)';
+                    } else {
+                        info.status = 'offline';
+                        info.statusText = 'Çevrim Dışı';
+                        info.lastSeen = discoveredPrinters[i].lastSeen;
+                    }
+                }
+
+                discoveredPrinters[i] = {
+                    ...discoveredPrinters[i], ...info,
+                    id: discoveredPrinters[i].id,
+                    openPorts: info.openPorts || discoveredPrinters[i].openPorts,
+                    serialNumber: info.serialNumber || discoveredPrinters[i].serialNumber || '',
+                    mac: info.mac || discoveredPrinters[i].mac || '',
+                    // Yalnızca gerçekten cevap verdiyse tazele — budama buna bakıyor
+                    lastOnline: erisildi
+                        ? new Date().toISOString()
+                        : discoveredPrinters[i].lastOnline
+                };
+            }
         } catch (e) {
-            discoveredPrinters[i].lastSeen = 'Bağlantı hatası';
-            discoveredPrinters[i].status = 'offline';
-            discoveredPrinters[i].statusText = 'Çevrim Dışı';
+            const i = at();
+            if (i >= 0) {
+                discoveredPrinters[i] = {
+                    ...discoveredPrinters[i],
+                    lastSeen: 'Bağlantı hatası', status: 'offline', statusText: 'Çevrim Dışı'
+                };
+            }
         }
         done++;
-        scanStatus.message = `Yenileniyor... ${done}/${discoveredPrinters.length}`;
+        scanStatus.message = `Yenileniyor... ${done}/${total}`;
         return true;
     });
 
-    readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi
-    readings.pruneReadings(parseInt(getSetting('readings_retention_days')) || 90); // saklama politikası
-    saveKnownPrinters();
-    scanStatus.scanning = false;
-    scanStatus.message = 'Yenileme tamamlandı.';
+        readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi
+        readings.pruneReadings(parseInt(getSetting('readings_retention_days')) || 90); // saklama politikası
+        saveKnownPrinters();
+    } finally {
+        // refreshing EN SON temizlenir: /api/scan bunun düşmesini bekliyor,
+        // beklemesi bittiğinde scanStatus.scanning zaten false olmalı.
+        scanStatus.scanning = false;
+        scanStatus.message = refreshAbort ? 'Yenileme durduruldu.' : 'Yenileme tamamlandı.';
+        refreshing = false;
+    }
 }
 
 app.post('/api/refresh', requireRole('operator'), async (req, res) => {
@@ -336,6 +542,9 @@ if (discoveredPrinters.length > 0) {
     scanStatus.message = `${discoveredPrinters.length} kayıtlı yazıcı yüklendi, güncelleniyor...`;
     console.log(`[Açılış] ${discoveredPrinters.length} kayıtlı yazıcı yüklendi; arka planda sorgulanıyor.`);
     setTimeout(() => {
+        // Kullanıcı ilk 2 saniyede "Ağı Tara"ya bastıysa yenileme taramayla
+        // yarışır ve listeyi bozar — zamanlayıcı yolundaki korumanın aynısı.
+        if (scanStatus.scanning) return;
         refreshAllPrinters().catch(() => { scanStatus.scanning = false; });
     }, 2000);
 }
@@ -659,7 +868,7 @@ app.get('/api/report/user-access/:sam', async (req, res) => {
 // ============================================
 // AYARLAR & DENETİM LOGU
 // ============================================
-const SETTING_KEYS = ['currency', 'scan_base_ip', 'scan_cidr', 'snmp_community', 'ad_url', 'ad_base_dn', 'ad_bind_dn', 'ad_password', 'ad_share_roots', 'ad_tls_insecure', 'auto_refresh_minutes', 'winrm_enabled', 'app_access_map', 'readings_retention_days',
+const SETTING_KEYS = ['currency', 'scan_base_ip', 'scan_cidr', 'scan_targets', 'printer_stale_days', 'snmp_community', 'ad_url', 'ad_base_dn', 'ad_bind_dn', 'ad_password', 'ad_share_roots', 'ad_tls_insecure', 'auto_refresh_minutes', 'winrm_enabled', 'app_access_map', 'readings_retention_days',
     'snmp_version', 'snmp_v3_user', 'snmp_v3_auth_protocol', 'snmp_v3_auth_key', 'snmp_v3_priv_protocol', 'snmp_v3_priv_key'];
 // İstemciye asla dönmeyecek gizli ayarlar
 const SECRET_SETTING_KEYS = ['ad_password', 'snmp_v3_auth_key', 'snmp_v3_priv_key'];

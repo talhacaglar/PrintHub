@@ -220,6 +220,35 @@ function renderNotifications() {
 // ============================================
 // MODAL
 // ============================================
+// Yazıcının SNMP'den bildirdiği uyarıları (hrPrinterDetectedErrorState)
+// listeler. Rozete yalnızca en ağırı sığdığı için tamamı burada gösterilir.
+// Uyarı yoksa hiç bölüm basılmaz.
+function renderPrinterErrors(printer) {
+    const errors = Array.isArray(printer.errors) ? printer.errors : [];
+    if (errors.length === 0) return '';
+
+    const items = errors.map(e => {
+        const seviye = e.seviye === 'error' ? 'error' : 'warning';
+        const ikon = seviye === 'error' ? 'error' : 'warning';
+        return `
+            <div class="modal-info-item">
+                <span class="material-icons-round" style="color: var(--status-${seviye})">${ikon}</span>
+                <div class="info-content">
+                    <span class="info-value" style="color: var(--status-${seviye})">${escapeHtml(e.mesaj)}</span>
+                </div>
+            </div>`;
+    }).join("");
+
+    return `
+        <div class="modal-section">
+            <div class="modal-section-title">
+                <span class="material-icons-round">report_problem</span>
+                Cihaz Uyarıları
+            </div>
+            <div class="modal-info-grid">${items}</div>
+        </div>`;
+}
+
 function openPrinterModal(printerId) {
     const printer = printers.find(p => p.id === printerId);
     if (!printer) return;
@@ -318,6 +347,8 @@ function openPrinterModal(printerId) {
             </div>
         </div>
 
+        ${renderPrinterErrors(printer)}
+
         <div class="modal-section">
             <div class="modal-section-title">
                 <span class="material-icons-round">info</span>
@@ -365,6 +396,15 @@ function openPrinterModal(printerId) {
                     <div class="info-content">
                         <span class="info-label">Son Görülme</span>
                         <span class="info-value">${escapeHtml(printer.lastSeen || 'Bilinmiyor')}</span>
+                    </div>
+                </div>
+                <div class="modal-info-item">
+                    <span class="material-icons-round">rss_feed</span>
+                    <div class="info-content">
+                        <span class="info-label">SNMP</span>
+                        <span class="info-value">${printer.snmpVersion
+                            ? 'v' + escapeHtml(printer.snmpVersion)
+                            : 'Yanıt yok'}</span>
                     </div>
                 </div>
             </div>
@@ -534,6 +574,10 @@ function setupEventListeners() {
 
     // Scan Button
     document.getElementById("scanBtn").addEventListener("click", startScan);
+
+    // Taramayı Durdur — geniş maskelerde erken bitirme
+    const stopBtn = document.getElementById("scanStopBtn");
+    if (stopBtn) stopBtn.addEventListener("click", stopScan);
 
     // Filter Chips
     document.querySelectorAll(".chip").forEach(chip => {

@@ -94,11 +94,17 @@ function migrate() {
         CREATE INDEX IF NOT EXISTS idx_readings_ip_time
             ON printer_readings(printer_ip, captured_at);
 
+        -- printer_ip çalışma zamanı tutamacıdır; KİMLİK serial_number > mac > ip
+        -- sırasıyla belirlenir (DHCP ile IP değişse de aynı cihaz tek kayıtta kalır).
         CREATE TABLE IF NOT EXISTS known_printers (
             printer_ip TEXT PRIMARY KEY,
             name TEXT DEFAULT '',
             model TEXT DEFAULT '',
             open_ports TEXT DEFAULT '[]',
+            serial_number TEXT DEFAULT '',               -- SNMP prtGeneralSerialNumber
+            mac TEXT DEFAULT '',                         -- SNMP ifPhysAddress (ilk sıfır olmayan)
+            first_seen TEXT DEFAULT '',                  -- ilk keşif (ISO)
+            last_online TEXT DEFAULT '',                 -- son GERÇEK cevap (ISO) — budama bunu kullanır
             last_seen TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -159,6 +165,10 @@ migrate();
 
 // Var olan kurulumlara sonradan eklenen kolonlar (idempotent)
 try { db.exec("ALTER TABLE stock_movements ADD COLUMN movement_date TEXT"); } catch (e) { /* kolon zaten var */ }
+try { db.exec("ALTER TABLE known_printers ADD COLUMN serial_number TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
+try { db.exec("ALTER TABLE known_printers ADD COLUMN mac TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
+try { db.exec("ALTER TABLE known_printers ADD COLUMN first_seen TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
+try { db.exec("ALTER TABLE known_printers ADD COLUMN last_online TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
 
 // ============================================
 // SEED — ilk çalıştırmada varsayılan admin + ayarlar
@@ -174,8 +184,10 @@ function seed() {
 
     const defaults = {
         currency: 'TRY',
-        scan_base_ip: '192.168.2.18',
-        scan_cidr: '22',
+        scan_base_ip: '192.168.2.18',  // scan_targets boşsa kullanılır (geriye dönük uyum)
+        scan_cidr: '22',               // "
+        scan_targets: '',              // serbest CIDR listesi: "192.168.2.0/24, 10.1.5.0/24"
+        printer_stale_days: '30',      // bu kadar gündür cevap vermeyen kayıt düşer (0 = kapalı)
         snmp_community: 'public',    // SNMP v2c community string
         ad_url: '',
         ad_base_dn: '',

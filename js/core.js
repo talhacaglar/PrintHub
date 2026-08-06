@@ -15,6 +15,11 @@ let currentView = "grid";
 let searchQuery = "";
 let isScanning = false;
 let scanPollInterval = null;
+// Poll, tarama isteğinden ÖNCE başlıyor (sunucu arka plan yenilemesini
+// durdururken yanıt gecikebilir). Sunucu isteği kabul ettiğini bildirmeden
+// gelen "scanning:false" bir ÖNCEKİ taramanın kalıntısıdır — onunla ilerleme
+// çubuğunu kapatmayalım.
+let scanAcknowledged = false;
 let autoRefreshInterval = null;
 let tonerTypesCache = []; // Stok sayfasındaki toner türleri (düzenle/hareket formları için)
 
@@ -302,24 +307,62 @@ async function startScan() {
     progressBar.style.display = "block";
     document.getElementById("scanProgressFill").style.width = "0%";
     document.getElementById("scanStatusText").textContent = "Ağ taraması başlatılıyor...";
+    const stopBtn = document.getElementById("scanStopBtn");
+    if (stopBtn) stopBtn.disabled = false;
+
+    // Poll'u istekten ÖNCE başlat: arka planda yenileme sürüyorsa sunucu onu
+    // durdurmayı bekler ve yanıt on saniyeyi bulabilir. Poll bu sırada
+    // "Arka plan yenilemesi durduruluyor..." mesajını gösterir.
+    scanAcknowledged = false;
+    scanPollInterval = setInterval(pollScanStatus, 1000);
 
     try {
-        // Gövde boş gönderilir; sunucu kayıtlı ayarları (scan_base_ip / scan_cidr)
-        // kullanır. Böylece Ayarlar > Ağ Tarama alanları tek yetkili kaynaktır.
-        await apiFetch(`${API_BASE}/api/scan`, {
+        // Gövde boş gönderilir; sunucu kayıtlı ayarları (scan_targets veya
+        // scan_base_ip / scan_cidr) kullanır. Böylece Ayarlar > Ağ Tarama
+        // alanları tek yetkili kaynaktır.
+        const res = await apiFetch(`${API_BASE}/api/scan`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({})
         });
 
-        // Tarama durumunu periyodik olarak kontrol et
-        scanPollInterval = setInterval(pollScanStatus, 1000);
+        // Geçersiz hedef / süren tarama → sunucu hiç başlatmadı
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            clearInterval(scanPollInterval);
+            scanPollInterval = null;
+            document.getElementById("scanStatusText").textContent =
+                err.error || 'Tarama başlatılamadı.';
+            isScanning = false;
+            scanBtn.classList.remove("scanning");
+            scanBtn.querySelector('.scan-btn-text').textContent = "Ağı Tara";
+            if (stopBtn) stopBtn.disabled = true;
+            setTimeout(() => { progressBar.style.display = "none"; }, 4000);
+            return;
+        }
+
+        // Sunucu isteği kabul etti; artık "scanning:false" gerçek bitiş demek
+        scanAcknowledged = true;
     } catch (e) {
+        clearInterval(scanPollInterval);
+        scanPollInterval = null;
         console.error('Tarama başlatılamadı:', e);
         isScanning = false;
         scanBtn.classList.remove("scanning");
         scanBtn.querySelector('.scan-btn-text').textContent = "Ağı Tara";
         progressBar.style.display = "none";
+    }
+}
+
+// Devam eden taramayı sunucu tarafında durdurur; elde edilen sonuçlar korunur
+async function stopScan() {
+    const btn = document.getElementById("scanStopBtn");
+    if (btn) btn.disabled = true;
+    try {
+        await apiFetch(`${API_BASE}/api/scan/stop`, { method: 'POST' });
+        document.getElementById("scanStatusText").textContent = "Tarama durduruluyor...";
+    } catch (e) {
+        console.error('Tarama durdurulamadı:', e);
     }
 }
 
@@ -336,6 +379,11 @@ async function pollScanStatus() {
         if (status.found > 0) {
             await fetchPrinters();
         }
+
+        if (status.scanning) scanAcknowledged = true;
+
+        // Henüz onay yoksa bu durum önceki taramanın kalıntısı — bekle
+        if (!status.scanning && !scanAcknowledged) return;
 
         if (!status.scanning) {
             clearInterval(scanPollInterval);

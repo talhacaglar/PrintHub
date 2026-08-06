@@ -1,7 +1,7 @@
 // node --test ile çalışır: npm test
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { getSubnetsForCIDR } = require('../scanner');
+const { getSubnetsForCIDR, parseScanTargets } = require('../scanner');
 
 test('/24 tek subnet döndürür', () => {
     assert.deepStrictEqual(getSubnetsForCIDR('192.168.2.18', '24'), ['192.168.2']);
@@ -27,10 +27,28 @@ test('/21 8 subnet döndürür', () => {
     assert.strictEqual(subnets[7], '172.16.15');
 });
 
-test('/16 MAX_SUBNETS (16) ile sınırlanır', () => {
+test('/16 tam 256 subnet döndürür (artık kırpılmaz)', () => {
     const subnets = getSubnetsForCIDR('10.0.99.1', '16');
-    assert.strictEqual(subnets.length, 16);
+    assert.strictEqual(subnets.length, 256);
     assert.strictEqual(subnets[0], '10.0.0');
+    assert.strictEqual(subnets[255], '10.0.255');
+});
+
+test('/8 tam 65536 subnet döndürür', () => {
+    const subnets = getSubnetsForCIDR('10.5.99.1', '8');
+    assert.strictEqual(subnets.length, 65536);
+    assert.strictEqual(subnets[0], '10.0.0');
+    assert.strictEqual(subnets[65535], '10.255.255');
+});
+
+test('/4 kabul edilir ve doğru ağ adresinden başlar', () => {
+    const subnets = getSubnetsForCIDR('200.1.2.3', '4');
+    assert.strictEqual(subnets.length, 1048576); // 2^20
+    assert.strictEqual(subnets[0], '192.0.0');   // 200 & 0xF0 = 192
+});
+
+test('/3 gibi çok geniş maske /24 varsayılanına düşer', () => {
+    assert.deepStrictEqual(getSubnetsForCIDR('10.1.2.3', '3'), ['10.1.2']);
 });
 
 test('geçersiz IP boş dizi döndürür', () => {
@@ -40,4 +58,55 @@ test('geçersiz IP boş dizi döndürür', () => {
 
 test('geçersiz CIDR /24 varsayılanına düşer', () => {
     assert.deepStrictEqual(getSubnetsForCIDR('192.168.1.5', 'xx'), ['192.168.1']);
+});
+
+// ============================================
+// parseScanTargets — serbest hedef listesi
+// Tek taban IP + maske yalnızca BİTİŞİK bir blok tarayabiliyordu; dağınık
+// yazıcı VLAN'ları ancak bu listeyle kapsanabiliyor.
+// ============================================
+
+test('parseScanTargets: virgülle ayrılmış birden çok bitişik olmayan aralık', () => {
+    assert.deepStrictEqual(
+        parseScanTargets('192.168.2.0/24, 10.1.5.0/24'),
+        ['192.168.2', '10.1.5']);
+});
+
+test('parseScanTargets: satır sonu ve noktalı virgül de ayırıcıdır', () => {
+    assert.deepStrictEqual(
+        parseScanTargets('192.168.2.0/24\n10.1.5.0/24;172.16.0.0/24'),
+        ['192.168.2', '10.1.5', '172.16.0']);
+});
+
+test('parseScanTargets: maske yazılmazsa /24 varsayılır', () => {
+    assert.deepStrictEqual(parseScanTargets('192.168.2.50'), ['192.168.2']);
+});
+
+test('parseScanTargets: geniş maske /24 öneklerine açılır', () => {
+    assert.deepStrictEqual(
+        parseScanTargets('172.16.8.0/22'),
+        ['172.16.8', '172.16.9', '172.16.10', '172.16.11']);
+});
+
+test('parseScanTargets: çakışan aralıklar tekilleştirilir', () => {
+    assert.deepStrictEqual(
+        parseScanTargets('192.168.0.0/23, 192.168.1.0/24'),
+        ['192.168.0', '192.168.1']);
+});
+
+test('parseScanTargets: bozuk maske o satırı atlar, diğerlerini bozmaz', () => {
+    // Sessizce /24'e düşürüp yanlış aralık taramaktansa satırı atlamak güvenli
+    assert.deepStrictEqual(
+        parseScanTargets('192.168.2.0/abc, 10.1.5.0/24, 10.2.0.0/99'),
+        ['10.1.5']);
+});
+
+test('parseScanTargets: geçersiz IP atlanır', () => {
+    assert.deepStrictEqual(parseScanTargets('999.1.2.3/24, 10.1.5.0/24'), ['10.1.5']);
+});
+
+test('parseScanTargets: boş giriş boş dizi döndürür (tarama başlatılmamalı)', () => {
+    assert.deepStrictEqual(parseScanTargets(''), []);
+    assert.deepStrictEqual(parseScanTargets('  ,  \n '), []);
+    assert.deepStrictEqual(parseScanTargets(null), []);
 });
