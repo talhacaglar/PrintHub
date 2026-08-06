@@ -2,13 +2,17 @@
    CSS RESET & VARIABLES
    ============================================ */
 :root {
-    /* Color Palette - Dark Mode (varsayılan) */
-    --bg-primary: #0e1117;
-    --bg-secondary: #131720;
-    --bg-card: #171c26;
-    --bg-card-hover: #1c2230;
-    --bg-sidebar: #10141c;
-    --bg-input: #1a202c;
+    /* Color Palette - Dark Mode (varsayılan) — saf siyah (OLED)
+       Zemin ve kenar çubuğu tam #000; kartlar/inputlar zeminden ayrışsın
+       diye kademeli koyu griler. Hepsi #000 olsaydı yüzeyler kaybolurdu.
+       Palet nötr tutuldu (eski mavi-slate tonları saf siyahın yanında
+       mavimsi görünüyordu). */
+    --bg-primary: #000000;
+    --bg-secondary: #0a0a0a;
+    --bg-card: #0e0e0e;
+    --bg-card-hover: #161616;
+    --bg-sidebar: #000000;
+    --bg-input: #131313;
 
     /* Accent — minimalist: tek düz renk (gradyan yok) */
     --accent-primary: #6366f1;
@@ -26,11 +30,11 @@
     --status-error: #ef4444;
     --status-error-bg: rgba(239, 68, 68, 0.12);
 
-    /* Text */
-    --text-primary: #e6e9ef;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
-    --text-inverse: #0f172a;
+    /* Text — saf siyah üzerinde tam beyaz göz yorar; kırık beyaz kullanılır */
+    --text-primary: #ededed;
+    --text-secondary: #a3a3a3;
+    --text-muted: #808080; /* en koyu yüzeyde bile AA (4.5:1) üstünde kalır */
+    --text-inverse: #0a0a0a;
 
     /* Toner Colors */
     --toner-cyan: #06b6d4;
@@ -39,11 +43,12 @@
     --toner-black: #cbd5e1;
     --toner-black-bar: #94a3b8; /* siyah toner çubuğu dolgusu */
 
-    /* Borders & Surfaces */
-    --border-color: rgba(148, 163, 184, 0.10);
-    --border-hover: rgba(148, 163, 184, 0.22);
-    --glass: rgba(23, 28, 38, 0.92);
-    --glass-border: rgba(148, 163, 184, 0.14);
+    /* Borders & Surfaces — saf siyahta gölge iş görmez, ayrımı kenarlıklar
+       taşır; bu yüzden biraz daha belirgin ve nötr tutuldu */
+    --border-color: rgba(255, 255, 255, 0.11);
+    --border-hover: rgba(255, 255, 255, 0.24);
+    --glass: rgba(10, 10, 10, 0.94);
+    --glass-border: rgba(255, 255, 255, 0.14);
 
     /* Shadows — minimalist: hafif */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
