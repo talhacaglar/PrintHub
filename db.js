@@ -87,7 +87,10 @@ function migrate() {
             printer_ip TEXT NOT NULL,
             serial TEXT DEFAULT '',
             name TEXT DEFAULT '',
-            total_printed INTEGER NOT NULL DEFAULT 0,
+            -- NULL = sayaç okunamadı. Eskiden NOT NULL DEFAULT 0 idi ve SNMP'siz
+            -- her cihaz için 0 yazılıyordu; "hiç basmadı" ile "bilinmiyor" aynı
+            -- değere düşünce aylık tüketim hesabı bozuluyordu.
+            total_printed INTEGER,
             toner_json TEXT DEFAULT '{}',                -- {"black":42,"cyan":80,...}
             captured_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -169,6 +172,97 @@ try { db.exec("ALTER TABLE known_printers ADD COLUMN serial_number TEXT DEFAULT 
 try { db.exec("ALTER TABLE known_printers ADD COLUMN mac TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
 try { db.exec("ALTER TABLE known_printers ADD COLUMN first_seen TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
 try { db.exec("ALTER TABLE known_printers ADD COLUMN last_online TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
+// Tedarikçi ve teslim alan GERÇEK alanlar olarak tutulur. Excel dışa aktarımı
+// bunları eskiden hareket notundan / uygulama kullanıcı adından türetiyordu:
+// "FİRMA" sütununa 'STOK GİRİŞİ' sabiti, "ALAN KİŞİ" sütununa ise tonerı
+// teslim alan kişi değil işlemi giren operatörün adı yazılıyordu.
+try { db.exec("ALTER TABLE stock_movements ADD COLUMN supplier TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
+try { db.exec("ALTER TABLE stock_movements ADD COLUMN recipient TEXT DEFAULT ''"); } catch (e) { /* kolon zaten var */ }
+
+// ============================================
+// TEK SEFERLİK VERİ DÜZELTMELERİ
+// Kod artık uydurma değer üretmiyor; bu blok eski sürümlerin veritabanına
+// yazdıklarını temizler. Hepsi idempotenttir.
+// ============================================
+function cleanupFabricatedData() {
+    // 1) total_printed sütunu NOT NULL ise tabloyu yeniden kur (SQLite ALTER
+    //    ile kısıt kaldırılamaz). NULL = "sayaç okunamadı" ayrımı bunu gerektirir.
+    const kolonlar = db.prepare('PRAGMA table_info(printer_readings)').all();
+    const totalCol = kolonlar.find(c => c.name === 'total_printed');
+    if (totalCol && totalCol.notnull === 1) {
+        db.exec(`
+            CREATE TABLE printer_readings_yeni (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                printer_ip TEXT NOT NULL,
+                serial TEXT DEFAULT '',
+                name TEXT DEFAULT '',
+                total_printed INTEGER,
+                toner_json TEXT DEFAULT '{}',
+                captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO printer_readings_yeni (id, printer_ip, serial, name, total_printed, toner_json, captured_at)
+                SELECT id, printer_ip, serial, name,
+                       CASE WHEN total_printed > 0 THEN total_printed ELSE NULL END,
+                       toner_json, captured_at
+                FROM printer_readings;
+            DROP TABLE printer_readings;
+            ALTER TABLE printer_readings_yeni RENAME TO printer_readings;
+            CREATE INDEX IF NOT EXISTS idx_readings_ip_time
+                ON printer_readings(printer_ip, captured_at);
+        `);
+        console.log('[DB] printer_readings.total_printed artık NULL kabul ediyor (0 = "bilinmiyor" karışıklığı giderildi).');
+    }
+
+    // 2) İçinde ölçüm OLMAYAN okumalar silinir: sayfa sayacı yok ve toner
+    //    JSON'unda negatif olmayan tek bir seviye bile yok. Bunlar SNMP'ye
+    //    cevap vermeyen cihazlar için üretilmiş {"black":-1} kayıtlarıdır;
+    //    kartuş değişimi tespitinde -1 → 88 sıçraması olarak okunup hayali
+    //    kartuş değişimi ve maliyet üretiyorlardı.
+    const bosOkuma = db.prepare(`
+        DELETE FROM printer_readings
+        WHERE (total_printed IS NULL OR total_printed <= 0)
+          AND NOT EXISTS (
+              SELECT 1 FROM json_each(printer_readings.toner_json)
+              WHERE json_each.type = 'integer' AND json_each.value >= 0
+          )
+    `).run();
+    if (bosOkuma.changes > 0) {
+        console.log(`[DB] ${bosOkuma.changes} ölçümsüz yazıcı okuması silindi (SNMP yanıtı olmayan cihazlar için üretilmişti).`);
+    }
+
+    // 3) Kalan kayıtlarda "bilinmiyor" (negatif) toner seviyeleri JSON'dan
+    //    çıkarılır — bilinmiyor bir ölçüm değildir, zaman serisinde durmamalı.
+    const negatifli = db.prepare(`
+        SELECT id, toner_json FROM printer_readings
+        WHERE EXISTS (
+            SELECT 1 FROM json_each(printer_readings.toner_json)
+            WHERE json_each.type = 'integer' AND json_each.value < 0
+        )
+    `).all();
+    if (negatifli.length > 0) {
+        const guncelle = db.prepare('UPDATE printer_readings SET toner_json = ? WHERE id = ?');
+        const tx = db.transaction((rows) => {
+            for (const r of rows) {
+                let obj;
+                try { obj = JSON.parse(r.toner_json); } catch { continue; }
+                const temiz = Object.fromEntries(
+                    Object.entries(obj).filter(([, v]) => typeof v === 'number' && v >= 0)
+                );
+                guncelle.run(JSON.stringify(temiz), r.id);
+            }
+        });
+        tx(negatifli);
+        console.log(`[DB] ${negatifli.length} okumadan bilinmeyen (-1) toner seviyeleri çıkarıldı.`);
+    }
+
+    // 4) 'SNMP Yanıt Yok' bir teşhis mesajıdır, model değil — envanter
+    //    sütununda kalmamalı.
+    const model = db.prepare("UPDATE known_printers SET model = '' WHERE model = 'SNMP Yanıt Yok'").run();
+    if (model.changes > 0) {
+        console.log(`[DB] ${model.changes} yazıcının model alanından 'SNMP Yanıt Yok' teşhis metni temizlendi.`);
+    }
+}
+cleanupFabricatedData();
 
 // ============================================
 // SEED — ilk çalıştırmada varsayılan admin + ayarlar
@@ -184,10 +278,16 @@ function seed() {
 
     const defaults = {
         currency: 'TRY',
-        scan_base_ip: '192.168.2.18',  // scan_targets boşsa kullanılır (geriye dönük uyum)
-        scan_cidr: '22',               // "
+        // Tarama hedefi için varsayılan YOKTUR. Burada bir zamanlar belirli bir
+        // müşteri ağının adresi (192.168.2.18//22) sabit duruyordu; kurulan her
+        // kopya, kullanıcının ağıyla ilgisi olmayan 1022 adresi tarıyordu.
+        // Boşken /api/scan hata döner ve kullanıcıyı Ayarlar'a yönlendirir;
+        // /api/network/suggest makinenin GERÇEK arayüzlerinden öneri verir.
+        scan_base_ip: '',              // scan_targets boşsa kullanılır (geriye dönük uyum)
+        scan_cidr: '24',               // "
         scan_targets: '',              // serbest CIDR listesi: "192.168.2.0/24, 10.1.5.0/24"
         printer_stale_days: '30',      // bu kadar gündür cevap vermeyen kayıt düşer (0 = kapalı)
+        low_toner_percent: '10',       // düşük toner eşiği — sunucu ve arayüz ortak kaynağı
         snmp_community: 'public',    // SNMP v2c community string
         ad_url: '',
         ad_base_dn: '',

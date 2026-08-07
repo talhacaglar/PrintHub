@@ -11,7 +11,9 @@ async function loadSettings() {
         set("setBaseIp", s.scan_base_ip);
         set("setCidr", s.scan_cidr);
         set("setStaleDays", s.printer_stale_days);
+        set("setLowToner", s.low_toner_percent);
         updateCidrEstimate();
+        loadNetworkSuggestions();
         set("setSnmpCommunity", s.snmp_community);
         set("setSnmpVersion", s.snmp_version || '2c');
         set("setSnmpV3User", s.snmp_v3_user);
@@ -40,6 +42,38 @@ async function loadSettings() {
             if (el && Array.isArray(map)) el.value = map.map(m => `${m.group} = ${m.app}`).join('\n');
         } catch { /* ok */ }
     } catch (e) { /* ok */ }
+}
+
+// Bu makinenin GERÇEK ağ arayüzlerinden tarama hedefi önerir.
+// Sabit bir varsayılan (eskiden 192.168.2.18//22) yerine, işletim sisteminin
+// bildirdiği adres/maskeden türetilir — varsayım değil, ölçüm.
+async function loadNetworkSuggestions() {
+    const kutu = document.getElementById("networkSuggest");
+    if (!kutu) return;
+    kutu.innerHTML = '';
+    try {
+        const res = await apiFetch(`${API_BASE}/api/network/suggest`);
+        if (!res.ok) return;
+        const { networks } = await res.json();
+        if (!Array.isArray(networks) || networks.length === 0) return;
+
+        kutu.innerHTML = `<small class="pw-hint">Bu makinenin bağlı olduğu ağlar:</small> `
+            + networks.map(n => `<button type="button" class="net-suggest-chip"
+                    data-cidr="${escapeHtml(n.cidr)}"
+                    title="${escapeHtml(n.iface)} — ${escapeHtml(n.address)}">${escapeHtml(n.cidr)}</button>`).join(' ');
+
+        kutu.querySelectorAll('.net-suggest-chip').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const alan = document.getElementById("setScanTargets");
+                if (!alan) return;
+                const mevcut = alan.value.split(/[,;\n\r]+/).map(s => s.trim()).filter(Boolean);
+                const cidr = btn.dataset.cidr;
+                if (!mevcut.includes(cidr)) mevcut.push(cidr);
+                alan.value = mevcut.join('\n');
+                updateCidrEstimate();
+            });
+        });
+    } catch (e) { /* öneri isteğe bağlıdır */ }
 }
 
 // Bir CIDR maskesinin kaç /24 içerdiğini verir (scanner.js ile aynı kural:
@@ -115,6 +149,7 @@ async function saveGeneralSettings() {
         scan_base_ip: document.getElementById("setBaseIp").value.trim(),
         scan_cidr: document.getElementById("setCidr").value,
         printer_stale_days: document.getElementById("setStaleDays")?.value || '0',
+        low_toner_percent: document.getElementById("setLowToner")?.value || '10',
         snmp_community: document.getElementById("setSnmpCommunity").value.trim() || 'public',
         snmp_version: document.getElementById("setSnmpVersion")?.value || '2c',
         snmp_v3_user: document.getElementById("setSnmpV3User")?.value.trim() || '',

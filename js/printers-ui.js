@@ -77,48 +77,50 @@ function renderPrinters() {
     }
 }
 
+// Cihazdan okunan toner seviyelerini çubuklara çevirir.
+// Hangi çubukların çizileceği, "renkli mi" bayrağından DEĞİL, gerçekten okunan
+// renklerden belirlenir: renk bilgisi bilinmeyen (color === null) bir cihazda
+// da CMYK okunmuşsa gösterilir. -1 = bilinmiyor, hiç çizilmez.
+const TONER_BAR_ORDER = ['cyan', 'magenta', 'yellow', 'black'];
+
+function renderTonerBars(toner) {
+    const t = toner || {};
+    const siralı = [
+        ...TONER_BAR_ORDER.filter(c => c in t),
+        ...Object.keys(t).filter(c => !TONER_BAR_ORDER.includes(c))
+    ];
+    return siralı.map(color => {
+        const level = t[color];
+        if (typeof level !== 'number' || level < 0) return '';
+        const low = level <= lowTonerPercent() ? 'low' : '';
+        const etiket = color === 'black' ? 'K' : color[0].toUpperCase();
+        return `
+                    <div class="toner-row">
+                        <span class="toner-label ${escapeHtml(color)}">${escapeHtml(etiket)}</span>
+                        <div class="toner-bar-bg"><div class="toner-bar-fill ${escapeHtml(color)} ${low}" style="width:${level}%"></div></div>
+                        <span class="toner-percent ${low}">${level}%</span>
+                    </div>
+                `;
+    }).join('');
+}
+
 function createPrinterCard(printer, index) {
-    const isColor = printer.color;
+    const isColor = printer.color === true;
     const iconClass = isColor ? "color-printer" : "";
 
-    // Toner bilgisi var mı kontrol et
-    const hasToner = printer.toner && Object.keys(printer.toner).length > 0;
-    const tonerUnknown = hasToner && Object.values(printer.toner).every(v => v === -1);
+    // Teknoloji ve renk yalnızca cihazdan okunduysa yazılır. Eskiden
+    // 'inkjet' olmayan HER şey "Lazer", color=false olan her şey "Siyah-Beyaz"
+    // diye gösteriliyordu — hiç sorgulanmamış cihazlar dahil.
+    const ozellikler = [
+        printer.type === 'inkjet' ? 'Mürekkep Püskürtmeli' : printer.type === 'laser' ? 'Lazer' : '',
+        printer.color === true ? 'Renkli' : printer.color === false ? 'Siyah-Beyaz' : ''
+    ].filter(Boolean);
+    const altBaslik = ozellikler.length ? ozellikler.join(' • ') : (printer.model || 'Cihaz bilgisi alınamadı');
 
-    let tonerBars = '';
-    if (hasToner && !tonerUnknown) {
-        if (isColor) {
-            const colors = ['cyan', 'magenta', 'yellow', 'black'];
-            tonerBars = colors.map(color => {
-                const level = printer.toner[color];
-                if (level === undefined || level === -1) return '';
-                return `
-                    <div class="toner-row">
-                        <span class="toner-label ${color}">${color[0].toUpperCase()}</span>
-                        <div class="toner-bar-bg"><div class="toner-bar-fill ${color} ${level <= 15 ? 'low' : ''}" style="width:${level}%"></div></div>
-                        <span class="toner-percent ${level <= 15 ? 'low' : ''}">${level}%</span>
-                    </div>
-                `;
-            }).join('');
-        } else {
-            const level = printer.toner.black;
-            if (level !== undefined && level !== -1) {
-                tonerBars = `
-                    <div class="toner-row">
-                        <span class="toner-label black">K</span>
-                        <div class="toner-bar-bg"><div class="toner-bar-fill black ${level <= 15 ? 'low' : ''}" style="width:${level}%"></div></div>
-                        <span class="toner-percent ${level <= 15 ? 'low' : ''}">${level}%</span>
-                    </div>
-                `;
-            }
-        }
-    }
-
-    if (!tonerBars && tonerUnknown) {
+    let tonerBars = renderTonerBars(printer.toner);
+    if (!tonerBars) {
         tonerBars = `<div style="font-size:11px; color:var(--text-muted); padding:4px 0;">Toner bilgisi alınamadı</div>`;
     }
-
-    const queueLen = printer.queue ? printer.queue.length : 0;
 
     return `
         <div class="printer-card" data-printer-id="${printer.id}" style="animation-delay: ${index * 0.05}s">
@@ -129,12 +131,16 @@ function createPrinterCard(printer, index) {
                     </div>
                     <div style="min-width: 0; flex: 1;">
                         <div class="card-printer-name" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(printer.name || 'Bilinmeyen')}</div>
-                        <div class="card-printer-model">${printer.type === 'inkjet' ? 'Mürekkep Püskürtmeli' : 'Lazer'} ${isColor ? '• Renkli' : '• Siyah-Beyaz'}</div>
+                        <div class="card-printer-model" title="${escapeHtml(printer.model || altBaslik)}">${escapeHtml(altBaslik)}</div>
                     </div>
                 </div>
-                <div class="card-status-badge ${printer.status}">
+                <!-- statusText cihazın kendi prtAlertDescription metni olabilir ve
+                     çok uzun olabilir (ör. Samsung SL-M3825ND tek uyarıda 190
+                     karakter yolluyor). Rozette kırpılır, tamamı title'da ve
+                     modaldeki "Cihaz Uyarıları" bölümünde durur. -->
+                <div class="card-status-badge ${printer.status}" title="${escapeHtml(printer.statusText || printer.status)}">
                     <span class="status-dot"></span>
-                    ${printer.statusText || printer.status}
+                    <span class="badge-text">${escapeHtml(printer.statusText || printer.status)}</span>
                 </div>
             </div>
             <div class="card-details">
@@ -144,7 +150,7 @@ function createPrinterCard(printer, index) {
                 </div>
                 <div class="card-detail">
                     <span class="material-icons-round">location_on</span>
-                    <span>${escapeHtml(printer.customLocation || printer.location || 'Bilinmiyor')}</span>
+                    <span>${escapeHtml(printer.customLocation || printer.location || '—')}</span>
                 </div>
             </div>
             ${tonerBars ? `
@@ -155,10 +161,6 @@ function createPrinterCard(printer, index) {
                 </div>
             </div>` : ''}
             <div class="card-footer">
-                <div class="card-queue">
-                    <span class="material-icons-round">queue</span>
-                    <span>Kuyruk: <span class="card-queue-count">${queueLen}</span></span>
-                </div>
                 <div class="card-actions">
                     <button class="card-action-btn" title="Detaylar" onclick="event.stopPropagation(); openPrinterModal(${printer.id})">
                         <span class="material-icons-round">info</span>
@@ -178,7 +180,7 @@ function renderNotifications() {
 
     if (notifications.length === 0) {
         list.innerHTML = `
-            <div class="modal-empty-queue">
+            <div class="modal-empty-note">
                 <span class="material-icons-round">check_circle</span>
                 Bildirim yok — her şey yolunda!
             </div>
@@ -220,8 +222,19 @@ function renderNotifications() {
 // ============================================
 // MODAL
 // ============================================
-// Yazıcının SNMP'den bildirdiği uyarıları (hrPrinterDetectedErrorState)
-// listeler. Rozete yalnızca en ağırı sığdığı için tamamı burada gösterilir.
+// prtAlertTrainingLevel → kullanıcıya ne anlatıyor.
+// Bir uyarının teknisyen mi yoksa kullanıcı müdahalesi mi istediğini
+// yalnızca bu alan söyler; rozetteki metin tek başına bunu ayırt ettirmez.
+const MUDAHALE_ETIKET = {
+    fieldService: { metin: 'Teknisyen gerekir', ikon: 'engineering' },
+    management: { metin: 'Yönetici müdahalesi', ikon: 'admin_panel_settings' },
+    trained: { metin: 'Yetkili kullanıcı çözebilir', ikon: 'person' },
+    untrained: { metin: 'Kullanıcı çözebilir', ikon: 'person' }
+};
+
+// Yazıcının bildirdiği uyarıları listeler. Kaynak öncelikle prtAlertTable;
+// cihaz o tabloyu desteklemiyorsa hrPrinterDetectedErrorState bitleri.
+// Rozete yalnızca en ağırı sığdığı için tamamı burada gösterilir.
 // Uyarı yoksa hiç bölüm basılmaz.
 function renderPrinterErrors(printer) {
     const errors = Array.isArray(printer.errors) ? printer.errors : [];
@@ -229,23 +242,38 @@ function renderPrinterErrors(printer) {
 
     const items = errors.map(e => {
         const seviye = e.seviye === 'error' ? 'error' : 'warning';
-        const ikon = seviye === 'error' ? 'error' : 'warning';
+        const ikon = e.olay ? 'history' : (seviye === 'error' ? 'error' : 'warning');
+        // Geçmiş olaylar (binaryChangeEvent) kalıcı bir arıza değil; soluk gösterilir.
+        const renk = e.olay ? 'var(--text-muted)' : `var(--status-${seviye})`;
+        const mudahale = MUDAHALE_ETIKET[e.mudahale];
+        const altSatir = e.olay
+            ? 'Geçmiş olay — kalıcı arıza değil'
+            : (mudahale ? mudahale.metin : '');
         return `
-            <div class="modal-info-item">
-                <span class="material-icons-round" style="color: var(--status-${seviye})">${ikon}</span>
+            <div class="modal-info-item alert-item">
+                <span class="material-icons-round" style="color: ${renk}">${ikon}</span>
                 <div class="info-content">
-                    <span class="info-value" style="color: var(--status-${seviye})">${escapeHtml(e.mesaj)}</span>
+                    <span class="info-value" style="color: ${renk}">${escapeHtml(e.mesaj)}</span>
+                    ${altSatir ? `<span class="info-label">${escapeHtml(altSatir)}</span>` : ''}
                 </div>
             </div>`;
     }).join("");
+
+    // Bit dizisi teknisyen gerekip gerekmediğini ayırt edemez — kullanıcıya
+    // rozetin ne kadar güvenilir olduğunu söylemek gerekir.
+    const kaynakNotu = printer.alertKaynak === 'errorBits'
+        ? `<div class="note-box">Bu cihaz ayrıntılı uyarı tablosunu (prtAlertTable) desteklemiyor. Uyarılar tek bitlik durum dizisinden okundu; "Servis Gerekiyor" gibi genel bayraklar cihaz normal çalışırken de yanabilir.</div>`
+        : '';
 
     return `
         <div class="modal-section">
             <div class="modal-section-title">
                 <span class="material-icons-round">report_problem</span>
                 Cihaz Uyarıları
+                ${printer.needsService ? '<span class="chip-tag" style="background:var(--status-error-bg);color:var(--status-error)">Teknisyen gerekir</span>' : ''}
             </div>
-            <div class="modal-info-grid">${items}</div>
+            <div class="modal-info-grid alert-grid">${items}</div>
+            ${kaynakNotu}
         </div>`;
 }
 
@@ -256,48 +284,39 @@ function openPrinterModal(printerId) {
     const modal = document.getElementById("modalOverlay");
     const content = document.getElementById("modalContent");
 
-    const isColor = printer.color;
     const hasToner = printer.toner && Object.keys(printer.toner).length > 0;
 
-    // Toner items
+    // Toner kalemleri — hangi renklerin gösterileceği "renkli mi" bayrağından
+    // değil, cihazdan GERÇEKTEN okunan anahtarlardan gelir. Seviyesi bilinmeyen
+    // (-1) kalem "?" olarak gösterilir, sıfır dolulukmuş gibi çizilmez.
     let tonerItems = '';
     if (hasToner) {
-        if (isColor) {
-            const colorMap = { cyan: 'Cyan', magenta: 'Magenta', yellow: 'Yellow', black: 'Black' };
-            const colorCss = { cyan: 'var(--toner-cyan)', magenta: 'var(--toner-magenta)', yellow: 'var(--toner-yellow)', black: 'var(--toner-black)' };
-            const bgCss = { black: 'var(--toner-black-bar)' };
+        const colorMap = { cyan: 'Cyan', magenta: 'Magenta', yellow: 'Yellow', black: 'Black' };
+        const colorCss = { cyan: 'var(--toner-cyan)', magenta: 'var(--toner-magenta)', yellow: 'var(--toner-yellow)', black: 'var(--toner-black)' };
+        const bgCss = { black: 'var(--toner-black-bar)' };
 
-            for (const [color, label] of Object.entries(colorMap)) {
-                const level = printer.toner[color];
-                if (level === undefined) continue;
-                const display = level === -1 ? '?' : level + '%';
-                const width = level === -1 ? 0 : level;
-                const bg = bgCss[color] || colorCss[color];
-                tonerItems += `
-                    <div class="modal-toner-item">
+        const mevcut = TONER_BAR_ORDER.filter(c => c in printer.toner);
+        const tekKalem = mevcut.length === 1;
+
+        for (const color of mevcut) {
+            const level = printer.toner[color];
+            const bilinmiyor = typeof level !== 'number' || level < 0;
+            const display = bilinmiyor ? '?' : level + '%';
+            const width = bilinmiyor ? 0 : level;
+            const bg = bgCss[color] || colorCss[color];
+            const label = colorMap[color] || color;
+            tonerItems += `
+                    <div class="modal-toner-item"${tekKalem ? ' style="grid-column: span 2"' : ''}>
                         <div class="toner-header">
-                            <span class="toner-name" style="color: ${colorCss[color]}">${label}</span>
+                            <span class="toner-name" style="color: ${colorCss[color]}">${escapeHtml(label)}</span>
                             <span class="toner-val" style="color: ${colorCss[color]}">${display}</span>
                         </div>
                         <div class="modal-toner-bar"><div class="modal-toner-bar-fill" style="width:${width}%; background: ${bg}"></div></div>
                     </div>
                 `;
-            }
-        } else {
-            const level = printer.toner.black;
-            const display = (level === -1 || level === undefined) ? '?' : level + '%';
-            const width = (level === -1 || level === undefined) ? 0 : level;
-            tonerItems = `
-                <div class="modal-toner-item" style="grid-column: span 2">
-                    <div class="toner-header">
-                        <span class="toner-name" style="color: var(--toner-black)">Black Toner</span>
-                        <span class="toner-val" style="color: var(--toner-black)">${display}</span>
-                    </div>
-                    <div class="modal-toner-bar"><div class="modal-toner-bar-fill" style="width:${width}%; background: var(--toner-black-bar)"></div></div>
-                </div>
-            `;
         }
-    } else {
+    }
+    if (!tonerItems) {
         tonerItems = '<div style="font-size:13px; color:var(--text-muted); padding: 12px;">Toner bilgisi mevcut değil.</div>';
     }
 
@@ -314,28 +333,6 @@ function openPrinterModal(printerId) {
         `).join("")
         : '<div style="font-size:13px; color:var(--text-muted); padding: 12px;">Tepsi bilgisi mevcut değil.</div>';
 
-    // Queue
-    const queueList = printer.queue || [];
-    const queueHtml = queueList.length > 0
-        ? queueList.map(q => `
-            <div class="modal-queue-item">
-                <div class="queue-item-icon">
-                    <span class="material-icons-round">description</span>
-                </div>
-                <div class="queue-item-info">
-                    <div class="queue-item-name">${escapeHtml(q.name)}</div>
-                    <div class="queue-item-meta">${escapeHtml(q.user || '')} • ${escapeHtml(String(q.pages || '?'))} sayfa • ${escapeHtml(q.time || '')}</div>
-                </div>
-                <span class="queue-item-status ${q.status}">${q.status === 'printing' ? 'Yazdırılıyor' : 'Bekliyor'}</span>
-            </div>
-        `).join("")
-        : `
-            <div class="modal-empty-queue">
-                <span class="material-icons-round">check_circle</span>
-                Kuyrukta bekleyen iş yok
-            </div>
-        `;
-
     content.innerHTML = `
         <div class="modal-header">
             <div class="modal-printer-icon">
@@ -343,7 +340,9 @@ function openPrinterModal(printerId) {
             </div>
             <div class="modal-printer-info">
                 <h2>${escapeHtml(printer.name || 'Bilinmeyen Yazıcı')}</h2>
-                <p>${escapeHtml(printer.model || '')} • <span class="card-status-badge ${printer.status}" style="display:inline-flex; font-size:10px; padding:3px 8px; vertical-align: middle;">${escapeHtml(printer.statusText || printer.status)}</span></p>
+                <!-- Uzun uyarı metni burada kırpılır; tamamı hemen altındaki
+                     "Cihaz Uyarıları" bölümünde satır satır listeleniyor. -->
+                <p>${escapeHtml(printer.model || 'Model bilinmiyor')} • <span class="card-status-badge modal-status-badge ${printer.status}" title="${escapeHtml(printer.statusText || printer.status)}"><span class="badge-text">${escapeHtml(printer.statusText || printer.status)}</span></span></p>
             </div>
         </div>
 
@@ -479,16 +478,6 @@ function openPrinterModal(printerId) {
             </div>
             <div id="printerHistory"><div class="note-box">Yükleniyor...</div></div>
         </div>
-
-        <div class="modal-section">
-            <div class="modal-section-title">
-                <span class="material-icons-round">queue</span>
-                Yazdırma Kuyruğu (${queueList.length})
-            </div>
-            <div class="modal-queue-list">
-                ${queueHtml}
-            </div>
-        </div>
     `;
 
     modal.classList.add("show");
@@ -617,7 +606,7 @@ function setupEventListeners() {
     document.getElementById("clearNotifs").addEventListener("click", () => {
         notifications = [];
         document.getElementById("notifList").innerHTML = `
-            <div class="modal-empty-queue">
+            <div class="modal-empty-note">
                 <span class="material-icons-round">notifications_off</span>
                 Bildirim yok
             </div>

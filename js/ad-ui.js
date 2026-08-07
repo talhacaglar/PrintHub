@@ -149,11 +149,6 @@ async function openADUser(sam) {
             </tr>`).join('')}</tbody></table></div>`;
     }
 
-    const usedPrinters = (user.usedResources?.printers || []);
-    const usedHtml = usedPrinters.length
-        ? usedPrinters.map(p => `<div class="modal-info-item"><span class="material-icons-round">print</span><div class="info-content"><span class="info-label">${escapeHtml(p.name)}</span><span class="info-value">${p.jobs} iş • ${p.ip}</span></div></div>`).join('')
-        : '<div class="note-box">Kuyrukta bu kullanıcıya ait aktif yazdırma işi yok.</div>';
-
     // Uygulama erişimleri (grup → uygulama eşlemesinden)
     const apps = user.appAccess || [];
     const appsHtml = apps.length
@@ -208,10 +203,6 @@ async function openADUser(sam) {
             <div class="modal-section-title"><span class="material-icons-round">computer</span> Cihaz Envanteri (${devices.length})</div>
             ${devicesHtml}
             ${collectBtn}
-        </div>
-        <div class="modal-section">
-            <div class="modal-section-title"><span class="material-icons-round">devices</span> Genel Kullanılan Kaynaklar</div>
-            <div class="modal-info-grid">${usedHtml}</div>
         </div>
     `);
 }

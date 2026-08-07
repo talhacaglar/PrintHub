@@ -141,6 +141,20 @@ const MIN_CIDR = 4;
 const MAX_SUBNETS = parseInt(process.env.MAX_SCAN_SUBNETS || '1048576', 10);
 
 /**
+ * Bir dizginin geçerli, noktalı-ondalık IPv4 adresi olup olmadığını söyler.
+ * '01.2.3.4' gibi baştan sıfırlı ve '1.2.3.4 ' gibi boşluklu biçimler
+ * reddedilir — bunlar bazı çözümleyicilerde farklı adrese denk düşer.
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isValidIPv4(value) {
+    if (typeof value !== 'string') return false;
+    const parts = value.split('.');
+    if (parts.length !== 4) return false;
+    return parts.every(p => /^(0|[1-9]\d{0,2})$/.test(p) && Number(p) <= 255);
+}
+
+/**
  * Genel CIDR aritmetiği ile /24'lük subnet öneklerini üretir.
  * Örn: 192.168.2.18/22 → ['192.168.0','192.168.1','192.168.2','192.168.3']
  *      10.1.5.7/23     → ['10.1.4','10.1.5']
@@ -149,12 +163,14 @@ const MAX_SUBNETS = parseInt(process.env.MAX_SCAN_SUBNETS || '1048576', 10);
  * (MAX_SCAN_SUBNETS=0 → sınırsız).
  */
 function getSubnetsForCIDR(baseIp, cidr) {
-    const parts = String(baseIp).split('.').map(Number);
-    if (parts.length !== 4 || parts.some(p => isNaN(p) || p < 0 || p > 255)) {
-        return []; // geçersiz IP
-    }
-    let maskBits = parseInt(cidr);
-    if (isNaN(maskBits) || maskBits < MIN_CIDR || maskBits > 32) maskBits = 24;
+    if (!isValidIPv4(String(baseIp).trim())) return []; // geçersiz IP
+    const parts = String(baseIp).trim().split('.').map(Number);
+
+    // Bozuk maskeyi sessizce /24'e düşürmeyiz: kullanıcının istemediği bir
+    // aralığı taramak, hiç taramamaktan kötüdür. parseScanTargets de (aşağıda)
+    // aynı şekilde atlıyor — iki yol artık çelişmiyor.
+    const maskBits = parseInt(cidr, 10);
+    if (isNaN(maskBits) || maskBits < MIN_CIDR || maskBits > 32) return [];
 
     // /25..32 → tek /24 içinde kalır
     if (maskBits >= 24) {
@@ -218,4 +234,4 @@ function parseScanTargets(input) {
     return out;
 }
 
-module.exports = { scanNetwork, getSubnetsForCIDR, parseScanTargets, checkPort, scanHost };
+module.exports = { scanNetwork, getSubnetsForCIDR, parseScanTargets, checkPort, scanHost, isValidIPv4 };
