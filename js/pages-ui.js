@@ -1,77 +1,26 @@
 // ============================================
 // PAGE RENDERS (TABS)
 // ============================================
-function renderQueue() {
-    const view = document.getElementById("globalQueueView");
-    if (!view) return;
-
-    let allQueue = [];
-    printers.forEach(p => {
-        if (p.queue && p.queue.length > 0) {
-            p.queue.forEach(q => {
-                allQueue.push({ ...q, printerName: p.name, printerIp: p.ip });
-            });
-        }
-    });
-
-    if (allQueue.length === 0) {
-        view.innerHTML = `
-            <div class="empty-state">
-                <span class="material-icons-round">check_circle</span>
-                <h3>Kuyruk Boş</h3>
-                <p>Ağda şu anda bekleyen hiçbir yazdırma işi bulunmuyor.</p>
-            </div>
-        `;
-        return;
-    }
-
-    const tbody = allQueue.map(q => `
-        <tr>
-            <td>
-                <div style="font-weight: 500">${escapeHtml(q.printerName)}</div>
-                <div style="font-size: 11px; color: var(--text-muted)">${escapeHtml(q.printerIp)}</div>
-            </td>
-            <td><strong style="color: var(--text-primary)">${escapeHtml(q.name)}</strong></td>
-            <td>${escapeHtml(q.user || 'Bilinmeyen Kullanıcı')}</td>
-            <td>${escapeHtml(String(q.pages || '?'))} Sayfa</td>
-            <td>${escapeHtml(q.time || 'Şimdi')}</td>
-            <td><span class="queue-item-status ${q.status}" style="display:inline-block">${q.status === 'printing' ? 'Yazdırılıyor' : 'Bekliyor'}</span></td>
-        </tr>
-    `).join('');
-
-    view.innerHTML = `
-        <div class="table-container">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>Yazıcı</th>
-                        <th>Belge Adı</th>
-                        <th>Kullanıcı</th>
-                        <th>Boyut</th>
-                        <th>Zaman</th>
-                        <th>Durum</th>
-                    </tr>
-                </thead>
-                <tbody>${tbody}</tbody>
-            </table>
-        </div>
-    `;
-}
-
 async function renderReports() {
     const view = document.getElementById("reportsView");
     if (!view) return;
     view.innerHTML = `<div class="empty-state"><span class="material-icons-round spinning">sync</span><p>Yükleniyor...</p></div>`;
 
-    // Bellekteki yazıcılardan anlık özet
-    const totalPrinted = printers.reduce((sum, p) => sum + (p.totalPrinted || 0), 0);
-    const colorPrinters = printers.filter(p => p.color).length;
+    // Bellekteki yazıcılardan anlık özet.
+    // Sayacı okunamamış (null) cihazlar toplama katılmaz ve ayrıca sayılır —
+    // aksi halde eksik veri, "ağ bu kadar bastı" diye tam bir sayı gibi görünür.
+    const sayacBilinen = printers.filter(p => typeof p.totalPrinted === 'number' && p.totalPrinted > 0);
+    const totalPrinted = sayacBilinen.reduce((sum, p) => sum + p.totalPrinted, 0);
+    const sayacBilinmeyen = printers.length - sayacBilinen.length;
+    // color === null "bilinmiyor" demek; yalnızca kesin bilinenler sayılır.
+    const colorPrinters = printers.filter(p => p.color === true).length;
+    const renkBilinmeyen = printers.filter(p => p.color !== true && p.color !== false).length;
     const online = printers.filter(p => p.status === "online").length;
     const offline = printers.filter(p => p.status === "offline").length;
     const warning = printers.filter(p => p.status === "warning").length;
     let lowTonerCount = 0;
     printers.forEach(p => {
-        if (p.toner) Object.values(p.toner).forEach(level => { if (level >= 0 && level <= 15) lowTonerCount++; });
+        if (p.toner) Object.values(p.toner).forEach(level => { if (level >= 0 && level <= lowTonerPercent()) lowTonerCount++; });
     });
 
     // Zaman serisi + maliyet uçlarından beslenen özet (varsa)
@@ -114,7 +63,7 @@ async function renderReports() {
     const top = (usage.byPrinter || []).slice(0, 5);
     const topRows = top.length ? top.map(p => `
         <tr><td><strong>${escapeHtml(p.name)}</strong><div style="font-size:11px;color:var(--text-muted)">${escapeHtml(p.ip)}</div></td>
-        <td>${p.monthlyPages}</td><td>${(p.currentTotal || 0).toLocaleString('tr-TR')}</td></tr>`).join('')
+        <td>${p.monthlyPages}</td><td>${typeof p.currentTotal === 'number' ? p.currentTotal.toLocaleString('tr-TR') : '—'}</td></tr>`).join('')
         : `<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:20px">Yazıcı okuma geçmişi yok.</td></tr>`;
 
     // CSV: özet
@@ -122,17 +71,27 @@ async function renderReports() {
         ['Metrik', 'Değer'],
         [['Toplam Yazıcı', printers.length], ['Çevrim İçi', online], ['Çevrim Dışı', offline], ['Uyarı', warning],
          ['Ağda Basılan Toplam Sayfa', totalPrinted], ['Renkli Yazıcı', colorPrinters],
+         ['Sayacı Okunamayan Yazıcı', sayacBilinmeyen],
          ['Azalan/Biten Toner', lowTonerCount], ['Tahmini Toner Değişimi', usage.totalReplacements || 0],
+         ['Fiyatlandırılamayan Değişim', usage.unpricedReplacements || 0],
          ['Toplam Tüketim Maliyeti', `${totalOut} ${cur}`]]);
 
     view.innerHTML = `
         <div style="padding:0 28px;">
             <div class="stats-grid" style="padding:0;margin-bottom:20px;">
-                <div class="stat-card"><div class="stat-icon-wrap"><span class="material-icons-round">assessment</span></div><div class="stat-info"><span class="stat-value">${totalPrinted.toLocaleString('tr-TR')}</span><span class="stat-label">Ağda Basılan Toplam Sayfa</span></div></div>
-                <div class="stat-card"><div class="stat-icon-wrap"><span class="material-icons-round">palette</span></div><div class="stat-info"><span class="stat-value">${colorPrinters}</span><span class="stat-label">Renkli Yazıcı Sayısı</span></div></div>
-                <div class="stat-card"><div class="stat-icon-wrap" style="color:var(--status-error); background:var(--status-error-bg)"><span class="material-icons-round">opacity</span></div><div class="stat-info"><span class="stat-value" style="color:var(--status-error)">${lowTonerCount}</span><span class="stat-label">Azalan/Biten Toner</span></div></div>
+                <div class="stat-card"><div class="stat-icon-wrap"><span class="material-icons-round">assessment</span></div><div class="stat-info"><span class="stat-value">${totalPrinted.toLocaleString('tr-TR')}</span><span class="stat-label">Ağda Basılan Toplam Sayfa${sayacBilinmeyen ? ` (${sayacBilinmeyen} cihazın sayacı okunamadı)` : ''}</span></div></div>
+                <div class="stat-card"><div class="stat-icon-wrap"><span class="material-icons-round">palette</span></div><div class="stat-info"><span class="stat-value">${colorPrinters}</span><span class="stat-label">Renkli Yazıcı Sayısı${renkBilinmeyen ? ` (${renkBilinmeyen} cihaz bilinmiyor)` : ''}</span></div></div>
+                <div class="stat-card"><div class="stat-icon-wrap" style="color:var(--status-error); background:var(--status-error-bg)"><span class="material-icons-round">opacity</span></div><div class="stat-info"><span class="stat-value" style="color:var(--status-error)">${lowTonerCount}</span><span class="stat-label">Azalan/Biten Toner (≤%${lowTonerPercent()})</span></div></div>
                 <div class="stat-card"><div class="stat-icon-wrap"><span class="material-icons-round">payments</span></div><div class="stat-info"><span class="stat-value" style="font-size:22px">${fmtMoney(totalOut, cur)}</span><span class="stat-label">Toplam Tüketim Maliyeti</span></div></div>
             </div>
+            ${usage.unpricedReplacements > 0 ? `
+            <div class="note-box" style="margin-bottom:20px">
+                Tespit edilen ${usage.totalReplacements} kartuş değişiminin
+                <strong>${usage.unpricedReplacements}</strong> tanesi fiyatlandırılamadı:
+                ilgili yazıcının modeliyle eşleşen bir toner türü tanımlı değil.
+                Maliyet tahmini bu değişimleri <em>içermez</em>. Stok Yönetimi'nden
+                toner türlerine "Uyumlu Yazıcı Modeli" girerek tamamlayabilirsiniz.
+            </div>` : ''}
 
             <div class="settings-card" style="margin-bottom:20px;">
                 <h3 style="margin:0 0 16px">Yazıcı Durum Dağılımı (${printers.length} yazıcı)</h3>
@@ -253,9 +212,10 @@ async function renderStock() {
 
     // CSV dışa aktarma verisi (ISO 27001 kayıt kanıtı)
     registerCSV('stock', 'stok-hareketleri.csv',
-        ['İşlem Tarihi', 'Kayıt Zamanı', 'Toner', 'Renk', 'Yön', 'Adet', 'Birim Maliyet', 'Yazıcı', 'Kullanıcı', 'Not'],
+        ['İşlem Tarihi', 'Kayıt Zamanı', 'Toner', 'Renk', 'Yön', 'Adet', 'Birim Maliyet', 'Yazıcı', 'Firma', 'Teslim Alan', 'Kaydeden', 'Not'],
         movements.map(m => [m.movement_date || '', m.created_at, m.toner_name, COLOR_LABEL[m.color] || m.color,
-            m.direction === 'in' ? 'Giriş' : 'Çıkış', m.quantity, m.unit_cost, m.printer_ip || '', m.actor || '', m.note || '']));
+            m.direction === 'in' ? 'Giriş' : 'Çıkış', m.quantity, m.unit_cost, m.printer_ip || '',
+            m.supplier || '', m.recipient || '', m.actor || '', m.note || '']));
 
     const stockRows = stock.length ? stock.map(s => `
         <tr>
@@ -279,9 +239,10 @@ async function renderStock() {
             <td><span class="dir-badge ${m.direction}">${m.direction === 'in' ? '↓ Giriş' : '↑ Çıkış'}</span></td>
             <td>${m.quantity}</td>
             <td>${escapeHtml(m.printer_ip || '-')}</td>
+            <td>${escapeHtml(m.supplier || m.recipient || '-')}</td>
             <td>${escapeHtml(m.actor || '-')}</td>
             <td>${escapeHtml(m.note || '')}</td>
-        </tr>`).join('') : `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">Hareket kaydı yok.</td></tr>`;
+        </tr>`).join('') : `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:20px">Hareket kaydı yok.</td></tr>`;
 
     view.innerHTML = `
         <div style="padding:0 28px;">
@@ -314,7 +275,7 @@ async function renderStock() {
                 </div>
                 <div class="table-container">
                     <table class="data-table">
-                        <thead><tr><th>Tarih</th><th>Toner</th><th>Yön</th><th>Adet</th><th>Yazıcı</th><th>Kullanıcı</th><th>Not</th></tr></thead>
+                        <thead><tr><th>Tarih</th><th>Toner</th><th>Yön</th><th>Adet</th><th>Yazıcı</th><th>Firma / Teslim Alan</th><th>Kaydeden</th><th>Not</th></tr></thead>
                         <tbody>${moveRows}</tbody>
                     </table>
                 </div>
@@ -394,7 +355,12 @@ function openMovementForm(tonerId, tonerName, opts = {}) {
             <div class="form-group"><label>İşlem Tarihi</label><input class="form-input" id="mv_date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
             <div class="form-group"><label>Birim Maliyet (opsiyonel)</label><input class="form-input" id="mv_cost" type="number" step="0.01" placeholder="varsayılan tür maliyeti"></div>
             <div class="form-group"><label>Yazıcı (çıkış için)</label><select class="form-input" id="mv_printer"><option value="">— Seçilmedi —</option>${printerOpts}</select></div>
-            <div class="form-group"><label>Not</label><input class="form-input" id="mv_note" placeholder="ör: fatura no, tedarikçi"></div>
+            <!-- Firma ve Teslim Alan Excel raporunda ayrı sütunlardır. Doldurulmazsa
+                 o hücreler BOŞ kalır; uygulama artık nottan ya da giriş yapan
+                 kullanıcı adından tedarikçi/kişi türetmiyor. -->
+            <div class="form-group"><label>Firma / Tedarikçi <small class="pw-hint">(giriş için)</small></label><input class="form-input" id="mv_supplier" placeholder="boş bırakılabilir"></div>
+            <div class="form-group"><label>Teslim Alan Kişi <small class="pw-hint">(çıkış için)</small></label><input class="form-input" id="mv_recipient" placeholder="boş bırakılabilir"></div>
+            <div class="form-group"><label>Not</label><input class="form-input" id="mv_note" placeholder="ör: fatura no"></div>
             <div class="login-error" id="mv_err"></div>
             <button type="submit" class="login-btn">Kaydet</button>
         </form>
@@ -408,6 +374,8 @@ function openMovementForm(tonerId, tonerName, opts = {}) {
             movement_date: document.getElementById("mv_date").value,
             unit_cost: document.getElementById("mv_cost").value || null,
             printer_ip: document.getElementById("mv_printer").value || null,
+            supplier: document.getElementById("mv_supplier").value.trim(),
+            recipient: document.getElementById("mv_recipient").value.trim(),
             note: document.getElementById("mv_note").value.trim()
         };
         const res = await apiFetch(`${API_BASE}/api/stock/movements`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -433,6 +401,7 @@ async function openPrinterTonerOut(printerIp, printerName) {
             <div class="form-group"><label>Toner Türü</label><select class="form-input" id="pto_type" required>${typeOpts}</select></div>
             <div class="form-group"><label>Adet</label><input class="form-input" id="pto_qty" type="number" min="1" value="1" required></div>
             <div class="form-group"><label>İşlem Tarihi</label><input class="form-input" id="pto_date" type="date" value="${new Date().toISOString().slice(0, 10)}"></div>
+            <div class="form-group"><label>Teslim Alan Kişi <small class="pw-hint">(opsiyonel)</small></label><input class="form-input" id="pto_recipient" placeholder="boş bırakılabilir"></div>
             <div class="form-group"><label>Not</label><input class="form-input" id="pto_note" placeholder="ör: kartuş değişimi"></div>
             <div class="login-error" id="pto_err"></div>
             <button type="submit" class="login-btn">Çıkışı Kaydet</button>
@@ -443,11 +412,12 @@ async function openPrinterTonerOut(printerIp, printerName) {
     document.getElementById("ptoForm").addEventListener("submit", async (e) => {
         e.preventDefault();
         const body = {
-            toner_type_id: parseInt(document.getElementById("pto_type").value),
+            toner_type_id: parseInt(document.getElementById("pto_type").value, 10),
             direction: 'out',
             quantity: document.getElementById("pto_qty").value,
             movement_date: document.getElementById("pto_date").value,
             printer_ip: printerIp,
+            recipient: document.getElementById("pto_recipient").value.trim(),
             note: document.getElementById("pto_note").value.trim()
         };
         const res = await apiFetch(`${API_BASE}/api/stock/movements`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

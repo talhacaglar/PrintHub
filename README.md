@@ -39,10 +39,11 @@ denetim kaydı bir arada. Electron + Express + SQLite ile geliştirilmiştir.
 |---|---|
 | 🔍 **Ağ Keşfi** | Belirtilen IP aralığında (`/22`, `/24`) yazıcı portlarını (9100/631/515) tarar; bulunanlar DB'ye kaydedilir ve uygulama yeniden açıldığında tarama beklemeden otomatik yüklenip arka planda sorgulanır. |
 | 📊 **Yazıcı İzleme** | Toner/mürekkep seviyeleri, kağıt tepsileri, sayfa sayacı, durum ve düşük toner/kağıt bildirimleri — SNMP v2c veya v3 (auth/priv) ile. |
+| 🚨 **Ayrıntılı Cihaz Uyarıları** | `prtAlertTable` (RFC 3805) ile her uyarının şiddeti, cihazın kendi açıklaması ve **gereken müdahale seviyesi** — teknisyen mi gerekiyor yoksa kullanıcı mı çözebilir, ayırt edilir. Tabloyu desteklemeyen cihazlarda `hrPrinterDetectedErrorState` bitlerine düşülür. |
 | 💰 **Toner Maliyeti & Tüketim** | Toner tür bilgisi, birim maliyet, aylık basılan sayfa, yazıcı bazlı tüketim ve sayaç geçmişinden tahmini kartuş değişim sayısı. |
 | 📦 **Stok Yönetimi** | Toner türleri, stoğa giriş/çıkış hareketleri (geriye dönük tarihli), mevcut seviye ve bildirim paneline düşen düşük stok uyarıları. |
 | 🗂️ **Kişisel IT Envanteri** | Kullanıcıya atanmış cihazlar ve yüklü yazılımlar — AD (`Get-ADComputer`), WinRM (donanım/yazılım detayı) veya manuel giriş kaynaklı. |
-| 🔐 **Active Directory** | Gerçek LDAP bağlantısı; kullanıcıya tıklandığında grup üyelikleri, ağ klasörü okuma/yazma yetkileri (Windows `Get-Acl`) ve kullanılan kaynaklar. |
+| 🔐 **Active Directory** | Gerçek LDAP bağlantısı; kullanıcıya tıklandığında grup üyelikleri, ağ klasörü okuma/yazma yetkileri (Windows `Get-Acl`), uygulama erişimleri ve cihaz envanteri. |
 | 🛡️ **ISO 27001 / Güvenlik** | Rol tabanlı erişim (RBAC), aranabilir/filtrelenebilir denetim kaydı, erişim hakları raporu, kullanıcı yönetimi ve zorunlu ilk parola değişimi. |
 | 🌗 **Açık / Karanlık Tema** | Üst bardaki düğmeyle geçiş, tercih kalıcı; minimalist, sade arayüz. |
 | 📤 **CSV Dışa Aktarma** | Stok hareketleri, denetim kaydı, maliyet ve tüketim tabloları tek tıkla CSV (Excel uyumlu, UTF-8 BOM). |
@@ -111,7 +112,7 @@ Uygulama açılışında giriş ekranı gelir. Sunucu yalnızca `127.0.0.1` üze
 
 Ayarlar sayfasından:
 
-- **Ağ Tarama** — Base IP, CIDR maskesi, para birimi, otomatik yenileme aralığı.
+- **Ağ Tarama** — Hedef CIDR listesi (veya Base IP + maske), düşük toner eşiği, para birimi, otomatik yenileme aralığı. Varsayılan bir tarama hedefi **yoktur**; makinenizin bağlı olduğu ağlar tıklanabilir öneri olarak sunulur (`os.networkInterfaces()` üzerinden okunur).
 - **SNMP** — v2c (community string) veya v3 (kullanıcı, auth/priv protokol ve anahtarları).
 - **Active Directory** — LDAP URL (`ldap://dc.sirket.local`), Base DN, servis hesabı (Bind DN + parola), paylaşım kök yolları.
 - **WinRM (opsiyonel)** — `winrm_enabled` açıldığında (yalnızca Windows) kişisel IT envanteri için uzak donanım/yazılım toplaması etkinleşir.
@@ -137,29 +138,6 @@ olmadan doğrular.
 > Testler, `better-sqlite3` ile aynı ABI'yi kullanmak için Electron çalıştırıcısı
 > altında koşar (`ELECTRON_RUN_AS_NODE=1`). Electron kurulu değilse otomatik olarak
 > düz `node`'a düşer. Doğrudan Node ile denemek için: `npm run test:node`.
-
-## 🧮 Stok Simülasyonu (demo verisi)
-
-Boş bir kurulumda stok/maliyet ekranlarını doldurmak için, ağdaki **gerçek**
-yazıcı okumalarından (`printer_readings`) geriye dönük tüketim türetilebilir:
-
-```bash
-node scripts/seed-stock.js            # üret
-node scripts/seed-stock.js --temizle  # tamamen geri al
-```
-
-> ⚠️ **Bu veri simülasyondur.** Yazıcı modelleri, seri numaraları ve sayfa
-> sayaçları gerçektir; ancak **kartuş değişim tarihleri ve stok hareketleri
-> sayfa sayaçlarından türetilmiş tahminlerdir** — fiili satın alma kayıtları
-> değildir. Üretilen her satır `note` alanında `[SIM]` ile, `actor` alanında
-> `sistem(simülasyon)` ile damgalanır; böylece gerçek kayıtlardan ayırt
-> edilebilir ve `--temizle` ile eksiksiz silinebilir.
->
-> Gerçek stok takibine geçerken önce `--temizle` çalıştırın.
-
-Hesaplama yöntemi: `kartuş = ömür_sayfa ÷ kartuş_verimi × renk_faktörü`
-(renkli kartuşlar için %35 kapsama varsayımı). Fiyatlar 2025 Türkiye piyasası
-orijinal kartuş ortalamalarıdır — kendi tedarikçi fiyatlarınızla güncelleyin.
 
 ## 📦 Paketleme
 

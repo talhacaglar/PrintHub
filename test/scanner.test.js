@@ -1,7 +1,7 @@
 // node --test ile çalışır: npm test
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { getSubnetsForCIDR, parseScanTargets } = require('../scanner');
+const { getSubnetsForCIDR, parseScanTargets, isValidIPv4 } = require('../scanner');
 
 test('/24 tek subnet döndürür', () => {
     assert.deepStrictEqual(getSubnetsForCIDR('192.168.2.18', '24'), ['192.168.2']);
@@ -47,8 +47,11 @@ test('/4 kabul edilir ve doğru ağ adresinden başlar', () => {
     assert.strictEqual(subnets[0], '192.0.0');   // 200 & 0xF0 = 192
 });
 
-test('/3 gibi çok geniş maske /24 varsayılanına düşer', () => {
-    assert.deepStrictEqual(getSubnetsForCIDR('10.1.2.3', '3'), ['10.1.2']);
+// Bozuk maske sessizce /24'e düşürülmez: kullanıcının istemediği bir aralığı
+// taramak, hiç taramamaktan kötüdür. parseScanTargets zaten böyle davranıyordu;
+// iki yol artık çelişmiyor.
+test('/3 gibi çok geniş (MIN_CIDR altı) maske boş dizi döndürür', () => {
+    assert.deepStrictEqual(getSubnetsForCIDR('10.1.2.3', '3'), []);
 });
 
 test('geçersiz IP boş dizi döndürür', () => {
@@ -56,8 +59,22 @@ test('geçersiz IP boş dizi döndürür', () => {
     assert.deepStrictEqual(getSubnetsForCIDR('abc', '24'), []);
 });
 
-test('geçersiz CIDR /24 varsayılanına düşer', () => {
-    assert.deepStrictEqual(getSubnetsForCIDR('192.168.1.5', 'xx'), ['192.168.1']);
+test('geçersiz CIDR boş dizi döndürür (sessizce /24 varsayılmaz)', () => {
+    assert.deepStrictEqual(getSubnetsForCIDR('192.168.1.5', 'xx'), []);
+    assert.deepStrictEqual(getSubnetsForCIDR('192.168.1.5', ''), []);
+    assert.deepStrictEqual(getSubnetsForCIDR('192.168.1.5', '99'), []);
+});
+
+test('isValidIPv4 baştan sıfırlı ve boşluklu biçimleri reddeder', () => {
+    assert.strictEqual(isValidIPv4('192.168.1.5'), true);
+    assert.strictEqual(isValidIPv4('0.0.0.0'), true);
+    assert.strictEqual(isValidIPv4('255.255.255.255'), true);
+    assert.strictEqual(isValidIPv4('01.2.3.4'), false);   // baştan sıfır
+    assert.strictEqual(isValidIPv4('192.168.1.5 '), false);
+    assert.strictEqual(isValidIPv4('256.1.1.1'), false);
+    assert.strictEqual(isValidIPv4('1.2.3'), false);
+    assert.strictEqual(isValidIPv4('yazici.sirket.local'), false);
+    assert.strictEqual(isValidIPv4(null), false);
 });
 
 // ============================================
