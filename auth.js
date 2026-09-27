@@ -284,6 +284,10 @@ function attachAuthRoutes(app) {
         if (!row) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
 
         if (role && ['admin', 'operator', 'viewer'].includes(role)) {
+            const adminCount = db.prepare("SELECT COUNT(*) AS c FROM app_users WHERE role = 'admin'").get().c;
+            if (row.role === 'admin' && role !== 'admin' && adminCount <= 1) {
+                return res.status(400).json({ error: 'Son yöneticinin rolü değiştirilemez.' });
+            }
             db.prepare('UPDATE app_users SET role = ? WHERE id = ?').run(role, id);
         }
         if (password) {
