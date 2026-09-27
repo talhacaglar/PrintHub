@@ -30,7 +30,7 @@ app.use(express.json());
 app.use(sessionMiddleware);
 // Bearer jetonu veya oturum çerezinden kimliği çöz (req.authUser)
 app.use(authenticate);
-app.use(express.static(__dirname)); // HTML/CSS/JS dosyalarını sun (login öncesi gerekli)
+require('./ui-static')(app); // Yalnız arayüz dosyaları login öncesi sunulur
 
 // ============================================
 // STATE
