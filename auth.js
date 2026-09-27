@@ -128,9 +128,24 @@ function authenticate(req, res, next) {
     if (!req.authUser) {
         const tokenUser = resolveTokenUser(req);
         if (tokenUser) req.authUser = tokenUser;
-        else if (req.session && req.session.user) req.authUser = req.session.user;
+        else req.authUser = resolveSessionUser(req);
     }
     next();
+}
+
+// Cookie sessions must reflect current database permissions and credentials.
+function resolveSessionUser(req) {
+    if (!req.session?.user) return null;
+    const row = db.prepare('SELECT * FROM app_users WHERE id = ?').get(req.session.user.id);
+    if (!row || req.session.credentialVersion !== hashToken(row.password_hash)) {
+        delete req.session.user;
+        delete req.session.credentialVersion;
+        return null;
+    }
+    return {
+        id: row.id, username: row.username, role: row.role,
+        mustChangePassword: !!row.must_change_password
+    };
 }
 
 // --- Middleware'ler ---
@@ -158,7 +173,7 @@ function currentUser(req) {
     if (req.authUser) return req.authUser;
     const tokenUser = resolveTokenUser(req);
     if (tokenUser) { req.authUser = tokenUser; return tokenUser; }
-    return (req.session && req.session.user) || null;
+    return resolveSessionUser(req);
 }
 
 // --- Rotalar ---
@@ -184,6 +199,7 @@ function attachAuthRoutes(app) {
         }
 
         clearLoginFailures(uname);
+        req.session.credentialVersion = hashToken(row.password_hash);
         req.session.user = { id: row.id, username: row.username, role: row.role, mustChangePassword: !!row.must_change_password };
         // Bearer jetonu üret — istemci sonraki isteklerde Authorization başlığıyla gönderir
         const { token, expiresAt } = issueToken(row.id, ip);
@@ -224,7 +240,10 @@ function attachAuthRoutes(app) {
         }
         const hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
         db.prepare('UPDATE app_users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, me.id);
-        if (req.session && req.session.user) req.session.user.mustChangePassword = false; // kapı middleware'i için bayrağı temizle
+        if (req.session && req.session.user) {
+            req.session.user.mustChangePassword = false;
+            req.session.credentialVersion = hashToken(hash);
+        }
         if (req.authUser) req.authUser.mustChangePassword = false;
 
         // Parola değişti → eski jetonların tamamı iptal, yerine tek yeni jeton.

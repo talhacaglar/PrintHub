@@ -104,8 +104,8 @@ test('currentUser jetonu çerez oturumuna tercih eder', () => {
 });
 
 test('currentUser jeton yoksa çerez oturumuna düşer (geriye dönük uyumluluk)', () => {
-    const req = reqWith(null, { user: { id: 999, username: 'cerez', role: 'viewer' } });
-    assert.strictEqual(auth.currentUser(req).username, 'cerez');
+    const req = reqWith(null, { user: { id: USER_ID }, credentialVersion: auth.hashToken('x') });
+    assert.strictEqual(auth.currentUser(req).username, 'tokentest');
 });
 
 test('requireAuth jetonlu isteği geçirir, jetonsuzu 401 ile reddeder', () => {
@@ -151,4 +151,27 @@ test('authenticate middleware req.authUser doldurur', () => {
 test.after(() => {
     try { db.close(); } catch (e) { /* zaten kapalı */ }
     try { fs.rmSync(TMP_DIR, { recursive: true, force: true }); } catch (e) { /* ok */ }
+});
+
+test('cookie permissions follow role changes instead of retaining cached admin rights', () => {
+    const req = reqWith(null, { user: { id: USER_ID, role: 'admin' }, credentialVersion: auth.hashToken('x') });
+    auth.authenticate(req, {}, () => {});
+    assert.strictEqual(auth.currentUser(req).role, 'operator');
+});
+
+test('password reset invalidates an existing cookie session', () => {
+    const req = reqWith(null, { user: { id: USER_ID }, credentialVersion: auth.hashToken('x') });
+    db.prepare('UPDATE app_users SET password_hash = ? WHERE id = ?').run('reset-hash', USER_ID);
+    try {
+        auth.authenticate(req, {}, () => {});
+        assert.strictEqual(auth.currentUser(req), null);
+        assert.strictEqual(req.session.user, undefined);
+    } finally {
+        db.prepare('UPDATE app_users SET password_hash = ? WHERE id = ?').run('x', USER_ID);
+    }
+});
+
+test('deleted accounts and legacy cookie sessions cannot authenticate', () => {
+    assert.strictEqual(auth.currentUser(reqWith(null, { user: { id: 999 }, credentialVersion: auth.hashToken('x') })), null);
+    assert.strictEqual(auth.currentUser(reqWith(null, { user: { id: USER_ID, role: 'admin' } })), null);
 });
