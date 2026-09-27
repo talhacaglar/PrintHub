@@ -89,14 +89,16 @@ let scanStatus = {
 // ============================================
 // KİMLİK / RBAC ROTALARI (login/logout/me/users)
 // ============================================
-attachAuthRoutes(app);
-
-// Bu noktadan sonraki tüm /api uçları oturum ister
-app.use('/api', requireAuth);
+// Apply authentication and password-change checks before registering routes,
+// including user administration endpoints in attachAuthRoutes.
+app.use('/api', (req, res, next) => {
+    if (req.path === '/login') return next();
+    return requireAuth(req, res, next);
+});
 
 // Zorunlu parola değişimi kapısı — kullanıcı ilk parolasını değiştirmeden
 // hiçbir işlem yapamaz (yalnız parola değiştirme / oturum uçları serbest).
-const PW_GATE_ALLOW = ['/change-password', '/logout', '/me'];
+const PW_GATE_ALLOW = ['/login', '/change-password', '/logout', '/me'];
 app.use('/api', (req, res, next) => {
     const user = currentUser(req);
     if (user && user.mustChangePassword && !PW_GATE_ALLOW.includes(req.path)) {
@@ -104,6 +106,8 @@ app.use('/api', (req, res, next) => {
     }
     next();
 });
+
+attachAuthRoutes(app);
 
 // ============================================
 // YAZICI API'LERİ
