@@ -32,18 +32,7 @@ app.use(express.json());
 app.use(sessionMiddleware);
 // Bearer jetonu veya oturum çerezinden kimliği çöz (req.authUser)
 app.use(authenticate);
-// Yalnızca istemci varlıkları sunulur (login ekranı için kimliksiz erişim şart).
-// Eskiden burada express.static(__dirname) vardı ve repo KÖKÜNÜ sunuyordu:
-// GET /printhub.db oturum gerektirmeden tüm veritabanını — bcrypt parola
-// özetleri, safeStorage ile şifreli AD parolası, ISO 27001 denetim kaydı —
-// indirilebilir yapıyordu. Aynı şekilde /server.js, /auth.js, /package.json,
-// /nohup.out da açıktı. 127.0.0.1 kısıtı bunu engellemiyor: makinedeki başka
-// bir süreç ya da renderer'daki tek bir XSS her şeyi dışarı taşıyabilirdi.
-const STATIC_OPTS = { index: false, dotfiles: 'deny', redirect: false };
-app.use('/js', express.static(path.join(__dirname, 'js'), STATIC_OPTS));
-app.use('/assets', express.static(path.join(__dirname, 'assets'), STATIC_OPTS));
-app.get('/style.css', (req, res) => res.sendFile(path.join(__dirname, 'style.css')));
-app.get(['/', '/index.html'], (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+require('./ui-static')(app); // Yalnız arayüz dosyaları login öncesi sunulur
 
 // ============================================
 // STATE
