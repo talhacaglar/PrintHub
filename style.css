@@ -561,6 +561,9 @@ body {
 
 .notif-text {
     flex: 1;
+    /* Bildirim açıklaması cihazın kendi uyarı cümlesini taşır; min-width:0
+       olmadan flex satırını genişletip zaman damgasının üstüne biniyordu. */
+    min-width: 0;
 }
 
 .notif-title {
@@ -573,6 +576,9 @@ body {
 .notif-desc {
     font-size: 12px;
     color: var(--text-muted);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    line-height: 1.45;
 }
 
 .notif-time {
@@ -618,7 +624,6 @@ body {
 .stat-online::before { background: var(--status-online); }
 .stat-offline::before { background: var(--status-offline); }
 .stat-warning::before { background: var(--status-warning); }
-.stat-queue::before { background: var(--accent-secondary); }
 
 .stat-card:hover {
     border-color: var(--border-hover);
@@ -652,11 +657,6 @@ body {
 .stat-warning .stat-icon-wrap {
     background: var(--status-warning-bg);
     color: var(--status-warning);
-}
-
-.stat-queue .stat-icon-wrap {
-    background: rgba(139, 92, 246, 0.12);
-    color: var(--accent-secondary);
 }
 
 .stat-info {
@@ -900,6 +900,11 @@ body {
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 2px;
+    /* Teknoloji/renk bilinmiyorsa buraya ham sysDescr düşer (100+ karakter
+       olabilir); kart yüksekliğini bozmasın diye tek satırda kırpılır. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .card-status-badge {
@@ -910,9 +915,33 @@ body {
     border-radius: 12px;
     font-size: 11px;
     font-weight: 600;
-    flex-shrink: 0;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    /* Rozet metni cihazdan gelir ve uzun olabilir (prtAlertDescription).
+       Eskiden flex-shrink:0 + kırpma yoktu; uzun uyarı rozeti büyütüp
+       yazıcı adının üstüne biniyordu. Artık kırpılır, tamamı title'da. */
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 45%;
+}
+
+.card-status-badge .badge-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.card-status-badge .status-dot { flex-shrink: 0; }
+
+/* Modal başlığındaki rozet satır içinde durur; kart ızgarasının %45 sınırı
+   burada geçerli değil, kendi üst sınırı var. */
+.modal-status-badge {
+    display: inline-flex;
+    vertical-align: middle;
+    font-size: 10px;
+    padding: 3px 8px;
+    max-width: min(100%, 28ch);
 }
 
 .card-status-badge.online {
@@ -1050,26 +1079,10 @@ body {
     border-top: 1px solid var(--border-color);
 }
 
-.card-queue {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-muted);
-}
-
-.card-queue .material-icons-round {
-    font-size: 16px;
-}
-
-.card-queue-count {
-    font-weight: 600;
-    color: var(--text-secondary);
-}
-
 .card-actions {
     display: flex;
     gap: 6px;
+    margin-left: auto;
 }
 
 .card-action-btn {
@@ -1227,15 +1240,27 @@ body {
     color: var(--accent-primary);
 }
 
+/* sysDescr ham metindir ve çok uzun olabilir — ör. Samsung SL-M3825ND
+   110 karakterlik "model; firmware; engine; NIC; S/N ..." dizisi bildiriyor.
+   min-width:0 olmadan bu satır başlığı genişletip rozeti kutunun dışına
+   itiyordu. */
+.modal-printer-info {
+    min-width: 0;
+    flex: 1;
+}
+
 .modal-printer-info h2 {
     font-size: 20px;
     font-weight: 700;
     margin-bottom: 4px;
+    overflow-wrap: anywhere;
 }
 
 .modal-printer-info p {
     font-size: 13px;
     color: var(--text-muted);
+    overflow-wrap: anywhere;
+    line-height: 1.5;
 }
 
 /* Modal Sections */
@@ -1265,6 +1290,11 @@ body {
     gap: 10px;
 }
 
+/* Grid/flex çocukları varsayılan min-width:auto ile içeriklerinden daha dar
+   olamaz; uzun bir metin hücreyi taşırıp komşu sütunun üstüne biniyordu.
+   min-width:0 bu daralmayı serbest bırakır. */
+.modal-info-grid > * { min-width: 0; }
+
 .modal-info-item {
     display: flex;
     align-items: center;
@@ -1273,16 +1303,19 @@ body {
     background: var(--bg-input);
     border-radius: var(--radius-md);
     border: 1px solid var(--border-color);
+    min-width: 0;
 }
 
 .modal-info-item .material-icons-round {
     font-size: 18px;
     color: var(--accent-primary);
+    flex-shrink: 0;
 }
 
 .modal-info-item .info-content {
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 
 .modal-info-item .info-label {
@@ -1294,6 +1327,31 @@ body {
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+/* Cihazdan gelen metinler (model, seri no, uyarı açıklaması) kırpılmadan
+   sarılır — boşluksuz uzun dizilerde de (seri no, CRUM kodu) taşmaz. */
+.modal-info-item .info-value,
+.modal-info-item .info-label {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+/* Cihaz Uyarıları: mesajlar anahtar/değer çifti değil, düz metindir ve
+   cihazın kendi cümlesi birkaç satır sürebilir. Tek sütunda, üstten
+   hizalı gösterilir — iki sütunlu ızgarada satırlar birbirine giriyordu. */
+.alert-grid { grid-template-columns: 1fr; }
+
+.alert-item {
+    align-items: flex-start;
+}
+
+.alert-item .material-icons-round {
+    margin-top: 1px;
+}
+
+.alert-item .info-value {
+    line-height: 1.45;
 }
 
 /* Modal Toner */
@@ -1378,83 +1436,15 @@ body {
 .modal-paper-item .tray-status.low { color: var(--status-warning); }
 .modal-paper-item .tray-status.empty { color: var(--status-error); }
 
-/* Modal Queue */
-.modal-queue-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.modal-queue-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px;
-    background: var(--bg-input);
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border-color);
-}
-
-.queue-item-icon {
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-    background: rgba(99, 102, 241, 0.1);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-}
-
-.queue-item-icon .material-icons-round {
-    font-size: 16px;
-    color: var(--accent-primary);
-}
-
-.queue-item-info {
-    flex: 1;
-    min-width: 0;
-}
-
-.queue-item-name {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.queue-item-meta {
-    font-size: 11px;
-    color: var(--text-muted);
-}
-
-.queue-item-status {
-    font-size: 11px;
-    font-weight: 600;
-    padding: 4px 8px;
-    border-radius: 6px;
-}
-
-.queue-item-status.printing {
-    background: rgba(99, 102, 241, 0.12);
-    color: var(--accent-primary);
-}
-
-.queue-item-status.waiting {
-    background: var(--status-warning-bg);
-    color: var(--status-warning);
-}
-
-.modal-empty-queue {
+/* Boş liste durumu (bildirim paneli vb.) */
+.modal-empty-note {
     text-align: center;
     padding: 24px;
     color: var(--text-muted);
     font-size: 13px;
 }
 
-.modal-empty-queue .material-icons-round {
+.modal-empty-note .material-icons-round {
     font-size: 40px;
     display: block;
     margin-bottom: 8px;
@@ -1678,7 +1668,7 @@ body {
 }
 
 /* ============================================
-   QUEUE & REPORTS TABLES
+   REPORTS TABLES
    ============================================ */
 .table-container {
     margin: 0 28px;
@@ -1984,6 +1974,15 @@ body {
 .ad-user-row { cursor: pointer; transition: background .15s; }
 .ad-user-row:hover { background: var(--bg-card-hover); }
 .pw-hint { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+/* Ayarlar > Ağ Tarama: makinenin gerçek arayüzlerinden gelen hedef önerileri */
+.net-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.net-suggest-chip {
+    background: var(--accent-primary-glow); color: var(--accent-primary);
+    border: 1px solid var(--glass-border); border-radius: 20px;
+    padding: 3px 11px; font-size: 12px; font-weight: 500;
+    cursor: pointer; font-family: inherit; transition: background .15s, border-color .15s;
+}
+.net-suggest-chip:hover { background: var(--bg-card-hover); border-color: var(--accent-primary); }
 .ad-test-result { margin-top: 12px; font-size: 13px; min-height: 18px; }
 .ad-test-result.ok { color: var(--status-online); }
 .ad-test-result.err { color: var(--status-error); }

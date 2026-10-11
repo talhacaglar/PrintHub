@@ -17,12 +17,36 @@ const TONER_NEW_MIN_LEVEL = 75;  // yanlış pozitif azaltma: yeni kartuş en az
  */
 function recordReading(printer) {
     if (!printer || !printer.ip) return;
-    // Anlamlı veri yoksa (SNMP yok) kayıt tutma
-    const total = Number(printer.totalPrinted) || 0;
-    const toner = printer.toner || {};
+
+    // SNMP yanıtı olmayan cihaz için okuma UYDURULMAZ. Fonksiyonun eski hâli
+    // "anlamlı veri yoksa kayıt tutma" diye yorumlanmıştı ama `Number(x) || 0`
+    // ile total_printed=0 ve toner {"black":-1} yazıyordu. server.js recordAll'ı
+    // çevrim dışı yazıcılar dahil TÜM listeyle çağırdığı için her yenilemede
+    // erişilemeyen her cihaz için bir satır ekleniyordu. İki ayrı bozulma:
+    //   1) 0 sayfa okuması aylık tüketimde min olarak alınıp cihazın ömür boyu
+    //      sayacı kadar sahte tüketim üretiyordu (getTonerUsageReport bunu
+    //      savunma amaçlı tp<=0 ile eliyordu — kendi ürettiğimiz veriye karşı),
+    //   2) -1 seviyesi bir sayı olduğu için, cihaz geri döndüğünde -1 → 88
+    //      geçişi "89 puanlık sıçrama" sayılıp HAYALİ kartuş değişimi ve
+    //      maliyet üretiyordu. Çevrim dışı olup dönen her yazıcı için bir tane.
+    if (printer.snmpAvailable === false) return;
+
+    const total = Number(printer.totalPrinted);
+    const sayfaVar = Number.isFinite(total) && total > 0;
+
+    // Bilinmeyen (negatif) seviyeler zaman serisine yazılmaz — "bilinmiyor"
+    // bir ölçüm değildir.
+    const toner = Object.fromEntries(
+        Object.entries(printer.toner || {})
+            .filter(([, v]) => typeof v === 'number' && v >= 0)
+    );
+
+    if (!sayfaVar && Object.keys(toner).length === 0) return; // kaydedilecek ölçüm yok
+
     db.prepare(`INSERT INTO printer_readings (printer_ip, serial, name, total_printed, toner_json)
                 VALUES (?, ?, ?, ?, ?)`)
-        .run(printer.ip, printer.serialNumber || '', printer.name || '', total, JSON.stringify(toner));
+        .run(printer.ip, printer.serialNumber || '', printer.name || '',
+             sayfaVar ? total : null, JSON.stringify(toner));
 }
 
 /**
@@ -49,6 +73,20 @@ function safeParse(s) { try { return JSON.parse(s); } catch { return {}; } }
 function ym(dateStr) { return (dateStr || '').slice(0, 7); } // 'YYYY-MM'
 
 /**
+ * Toner tipine tanımlı uyumlu yazıcı modeli ile cihazın bildirdiği sysDescr'ı
+ * eşleştirir. İki yönlü `includes` kullanılır çünkü sysDescr genelde daha uzundur
+ * ("HP LaserJet M506dn, Firmware 2.4" ⊃ "LaserJet M506"), bazen de kısadır.
+ * İkisinden biri boşsa eşleşme YOK sayılır — boş alanı joker kabul etmek,
+ * maliyeti rastgele bir toner tipine yazmak demek olurdu.
+ */
+function modelEslesir(tonerModel, yaziciModel) {
+    const a = String(tonerModel || '').trim().toLowerCase();
+    const b = String(yaziciModel || '').trim().toLowerCase();
+    if (!a || !b) return false;
+    return a.includes(b) || b.includes(a);
+}
+
+/**
  * Toner tüketim raporu:
  *  - byPrinter: yazıcı bazlı bu ayki sayfa, toplam sayfa aralığı, renk bazlı değişim sayısı
  *  - monthlyTotals: ay bazlı ağ geneli basılan sayfa
@@ -58,10 +96,13 @@ function getTonerUsageReport() {
     const tonerTypes = db.prepare('SELECT * FROM toner_types').all();
     const nowMonth = ym(new Date().toISOString());
 
-    // N+1 yerine tek sorgu: tüm okumalar bir kerede çekilir, JS'te IP bazında gruplanır
-    const allRows = db.prepare(`SELECT printer_ip, total_printed, toner_json, captured_at, name
-                                FROM printer_readings
-                                ORDER BY printer_ip, captured_at ASC`).all();
+    // N+1 yerine tek sorgu: tüm okumalar bir kerede çekilir, JS'te IP bazında
+    // gruplanır. Yazıcı modeli maliyet eşleştirmesi için known_printers'tan alınır.
+    const allRows = db.prepare(`SELECT r.printer_ip, r.total_printed, r.toner_json,
+                                       r.captured_at, r.name, k.model AS printer_model
+                                FROM printer_readings r
+                                LEFT JOIN known_printers k ON k.printer_ip = r.printer_ip
+                                ORDER BY r.printer_ip, r.captured_at ASC`).all();
     const rowsByIp = new Map();
     for (const r of allRows) {
         if (!rowsByIp.has(r.printer_ip)) rowsByIp.set(r.printer_ip, []);
@@ -71,6 +112,8 @@ function getTonerUsageReport() {
     const byPrinter = [];
     const monthlyMap = {};   // 'YYYY-MM' -> pages
     let totalReplacements = 0;
+    let pricedReplacements = 0;
+    let unpricedReplacements = 0;
     let totalCost = 0;
     const currency = (db.prepare("SELECT value FROM settings WHERE key='currency'").get() || {}).value || 'TRY';
 
@@ -99,7 +142,11 @@ function getTonerUsageReport() {
         }
         const monthlyPages = perMonth[nowMonth] ? Math.max(0, perMonth[nowMonth].max - perMonth[nowMonth].min) : 0;
 
-        // Renk bazlı kartuş değişim tespiti (seviye yukarı sıçraması)
+        // Renk bazlı kartuş değişim tespiti (seviye yukarı sıçraması).
+        // Negatif ("bilinmiyor") seviyeler açıkça elenir: -1 de bir sayı olduğu
+        // için -1 → 88 geçişi 89 puanlık sıçrama sayılıp hayali kartuş değişimi
+        // üretiyordu. recordReading artık negatif yazmıyor; bu kontrol eski
+        // kayıtlar için savunmadır.
         const replacements = {};
         let prev = null;
         for (const r of rows) {
@@ -108,7 +155,8 @@ function getTonerUsageReport() {
                 for (const [color, level] of Object.entries(toner)) {
                     const p = prev[color];
                     // Değişim = büyük yukarı sıçrama VE yeni seviyenin dolu kartuşa yakın olması
-                    if (typeof p === 'number' && typeof level === 'number'
+                    if (typeof p === 'number' && p >= 0
+                        && typeof level === 'number' && level >= 0
                         && level - p >= TONER_JUMP_THRESHOLD
                         && level >= TONER_NEW_MIN_LEVEL) {
                         replacements[color] = (replacements[color] || 0) + 1;
@@ -118,18 +166,35 @@ function getTonerUsageReport() {
             prev = toner;
         }
 
-        // Maliyet: renk bazlı değişim * eşleşen toner tipi birim maliyeti
+        // Maliyet: yalnızca BU yazıcının modeline tanımlanmış toner tipinden
+        // hesaplanır. Eskiden o renkteki ilk toner tipi kullanılıyordu — yani
+        // bir Konica değişimi, tabloda ilk sırada duran siyah tonerin fiyatıyla
+        // faturalanıyordu. Model eşleşmesi yoksa maliyet UYDURULMAZ; değişim
+        // "fiyatlandırılamadı" olarak ayrıca raporlanır.
+        const printerModel = rows[rows.length - 1].printer_model || '';
         for (const [color, count] of Object.entries(replacements)) {
             totalReplacements += count;
-            const match = tonerTypes.find(t => t.color === color) || null;
-            if (match) totalCost += count * (match.unit_cost || 0);
+            const match = tonerTypes.find(t => t.color === color && modelEslesir(t.printer_model, printerModel));
+            if (match) {
+                pricedReplacements += count;
+                totalCost += count * (match.unit_cost || 0);
+            } else {
+                unpricedReplacements += count;
+            }
         }
+
+        // Sayaç alanları yalnızca GERÇEK okumalardan gelir. total_printed artık
+        // NULL olabiliyor (sayaç okunamadı); `|| 0` ile 0'a düşürmek "cihaz hiç
+        // basmamış" demek olurdu.
+        const sayacli = rows.filter(r => typeof r.total_printed === 'number' && r.total_printed > 0);
+        const ilk = sayacli.length ? sayacli[0].total_printed : null;
+        const son = sayacli.length ? sayacli[sayacli.length - 1].total_printed : null;
 
         byPrinter.push({
             ip, name,
             monthlyPages,
-            totalRange: (rows[rows.length - 1].total_printed || 0) - (rows[0].total_printed || 0),
-            currentTotal: rows[rows.length - 1].total_printed || 0,
+            totalRange: son !== null && ilk !== null ? son - ilk : null,
+            currentTotal: son,
             replacements,
             readings: rows.length
         });
@@ -143,6 +208,11 @@ function getTonerUsageReport() {
         byPrinter: byPrinter.sort((a, b) => b.monthlyPages - a.monthlyPages),
         monthlyTotals,
         totalReplacements,
+        // estimatedCost KISMİdir: yalnızca modeli bir toner tipiyle eşleşen
+        // değişimleri kapsar. Arayüz fiyatlandırılamayan sayıyı ayrıca gösterir
+        // ki kullanıcı eksik bir toplamı tam sanmasın.
+        pricedReplacements,
+        unpricedReplacements,
         estimatedCost: Math.round(totalCost * 100) / 100,
         currency,
         currentMonth: nowMonth

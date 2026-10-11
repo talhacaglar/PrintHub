@@ -23,6 +23,24 @@ let scanAcknowledged = false;
 let autoRefreshInterval = null;
 let tonerTypesCache = []; // Stok sayfasındaki toner türleri (düzenle/hareket formları için)
 
+// Düşük toner eşiği sunucudaki tek kaynaktan (Ayarlar → low_toner_percent)
+// gelir. Eskiden arayüz 15, snmp-query.js 10 kullanıyordu; aynı kavram için
+// iki farklı sabit sayı vardı ve rozetle bildirim birbirini tutmuyordu.
+const LOW_TONER_FALLBACK = 10;
+let lowTonerPercentValue = LOW_TONER_FALLBACK;
+
+function lowTonerPercent() { return lowTonerPercentValue; }
+
+async function loadThresholds() {
+    try {
+        const res = await apiFetch(`${API_BASE}/api/settings`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const v = parseInt((data.settings || data || {}).low_toner_percent, 10);
+        if (Number.isFinite(v) && v >= 0 && v <= 100) lowTonerPercentValue = v;
+    } catch (e) { /* ayar okunamadıysa varsayılan eşik kullanılır */ }
+}
+
 // Oturum / RBAC
 let session = null; // { id, username, role }
 const ROLE_LEVEL = { viewer: 1, operator: 2, admin: 3 };
@@ -116,7 +134,7 @@ function showLogin() {
     document.getElementById("loginOverlay").classList.add("show");
 }
 
-function onLoggedIn(user) {
+async function onLoggedIn(user) {
     session = user;
     document.getElementById("loginOverlay").classList.remove("show");
 
@@ -137,6 +155,8 @@ function onLoggedIn(user) {
         setupEventListeners();
         if (!user.mustChangePassword) restoreLastPage();
     }
+    // Eşikler yazıcı listesinden önce yüklenir ki ilk render doğru olsun.
+    if (!user.mustChangePassword) await loadThresholds();
     fetchPrinters();
 }
 
@@ -235,7 +255,6 @@ function navigateToPage(pageId, opts = {}) {
     document.getElementById("sidebar").classList.remove("open");
 
     // Dinamik sayfa render tetikleme
-    if (pageId === "page-queue") renderQueue();
     if (pageId === "page-reports") renderReports();
     if (pageId === "page-stock") renderStock();
     if (pageId === "page-cost") renderCost();
@@ -476,7 +495,7 @@ async function generateNotifications() {
         // Düşük toner uyarısı
         if (printer.toner) {
             for (const [color, level] of Object.entries(printer.toner)) {
-                if (level >= 0 && level <= 15) {
+                if (level >= 0 && level <= lowTonerPercent()) {
                     notifications.push({
                         type: "warning",
                         icon: "warning",
@@ -588,13 +607,11 @@ function updateStats() {
     const online = printers.filter(p => p.status !== "offline").length;
     const offline = printers.filter(p => p.status === "offline").length;
     const warning = printers.filter(p => p.status === "warning" || p.status === "error").length;
-    const queueCount = printers.reduce((sum, p) => sum + (p.queue ? p.queue.length : 0), 0);
 
     setStat("statTotal", total);
     setStat("statOnline", online);
     setStat("statOffline", offline);
     setStat("statWarning", warning);
-    setStat("statQueue", queueCount);
     updateMonthlyCost();
 }
 

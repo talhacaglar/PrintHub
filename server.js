@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const { scanNetwork, getSubnetsForCIDR, parseScanTargets, scanHost } = require('./scanner');
+const path = require('path');
+const os = require('os');
+const { scanNetwork, getSubnetsForCIDR, parseScanTargets, scanHost, isValidIPv4 } = require('./scanner');
 const { queryPrinter } = require('./snmp-query');
 
 const { mergeScanResults, pruneStalePrinters } = require('./printer-identity');
@@ -49,6 +51,12 @@ function snmpCommunity() {
         };
     }
     return getSetting('snmp_community') || 'public';
+}
+
+// queryPrinter'ın davranışsal eşikleri — tek kaynak Ayarlar tablosu.
+function queryOpts() {
+    const low = parseInt(getSetting('low_toner_percent'), 10);
+    return { lowTonerPercent: Number.isFinite(low) ? low : undefined };
 }
 
 let discoveredPrinters = [];
@@ -109,7 +117,25 @@ app.get('/api/printers', (req, res) => {
     res.json({ printers: mergeAssets(discoveredPrinters), scanStatus });
 });
 
-app.put('/api/printer/:ip/asset', requireRole('operator'), (req, res) => {
+// :ip parametresi doğrulanmadan net-snmp'ye ya da DB'ye gitmemeli — net-snmp
+// gelen değeri hostname sayıp DNS çözümlemesi yapıyor.
+function requireIpParam(req, res, next) {
+    if (!isValidIPv4(req.params.ip)) {
+        return res.status(400).json({ error: 'Geçersiz IPv4 adresi.' });
+    }
+    next();
+}
+
+// Pozitif tam sayı olmayan :id, parseInt'ten NaN olarak çıkıp doğrudan
+// inventory katmanına gidiyordu.
+function requireIdParam(req, res, next) {
+    if (!/^[1-9]\d*$/.test(String(req.params.id))) {
+        return res.status(400).json({ error: 'Geçersiz kayıt numarası.' });
+    }
+    next();
+}
+
+app.put('/api/printer/:ip/asset', requireRole('operator'), requireIpParam, (req, res) => {
     const ip = req.params.ip;
     const { asset_tag, custom_location, notes } = req.body || {};
     db.prepare(`INSERT INTO printer_assets (printer_ip, asset_tag, custom_location, notes, updated_at)
@@ -124,10 +150,10 @@ app.put('/api/printer/:ip/asset', requireRole('operator'), (req, res) => {
     res.json({ ok: true });
 });
 
-app.get('/api/printer/:ip', async (req, res) => {
+app.get('/api/printer/:ip', requireIpParam, async (req, res) => {
     const ip = req.params.ip;
     try {
-        const info = await queryPrinter(ip, snmpCommunity());
+        const info = await queryPrinter(ip, snmpCommunity(), queryOpts());
         const idx = discoveredPrinters.findIndex(p => p.ip === ip);
         if (idx >= 0) {
             info.id = discoveredPrinters[idx].id;
@@ -141,9 +167,46 @@ app.get('/api/printer/:ip', async (req, res) => {
     }
 });
 
-app.get('/api/printer/:ip/history', (req, res) => {
+app.get('/api/printer/:ip/history', requireIpParam, (req, res) => {
     res.json({ history: readings.getHistory(req.params.ip) });
 });
+
+/**
+ * Henüz başarılı biçimde sorgulanmamış bir cihazın taban kaydı.
+ *
+ * Buradaki her alan BİLİNMİYOR anlamına gelir. Daha önce bu nesneler
+ * `model: 'SNMP Yanıt Yok', type: 'laser', color: false, location: 'Bilinmiyor',
+ * totalPrinted: 0` ile doluyordu; yani cihaza hiç ulaşılamamışken arayüzde
+ * "Lazer • Siyah-Beyaz, 0 sayfa" diye kendinden emin bir envanter satırı
+ * çıkıyor, üstelik teşhis metni known_printers.model sütununa kalıcı olarak
+ * yazılıyordu.
+ *
+ * @param {string} ip
+ */
+function unqueriedPrinter(ip) {
+    return {
+        ip,
+        name: `Yazıcı (${ip})`,
+        model: '',            // sysDescr okunamadı
+        type: '',             // baskı teknolojisi bilinmiyor
+        color: null,          // renkli mi bilinmiyor
+        mac: '',
+        location: '',         // sysLocation okunamadı
+        status: 'offline',
+        statusText: 'Sorgulanıyor...',
+        serialNumber: '',
+        firmware: '',
+        toner: { black: -1 }, // -1 = bilinmiyor
+        paperTrays: [],
+        totalPrinted: null,   // sayaç okunamadı — 0 "hiç basmadı" demek olurdu
+        monthlyPrinted: null,
+        snmpAvailable: false,
+        printerMib: false,
+        errors: [],
+        alertKaynak: '',
+        needsService: false
+    };
+}
 
 /**
  * Diziyi en fazla `limit` eşzamanlılıkla işler (Promise.allSettled benzeri,
@@ -230,6 +293,42 @@ function pruneStale(list) {
     return kept;
 }
 
+/**
+ * Bu makinenin bağlı olduğu ağları tarama hedefi olarak önerir.
+ *
+ * Sabit bir varsayılan IP aralığı yerine işletim sisteminin bildirdiği
+ * arayüz adres/maskesinden türetilir — yani öneri ÖLÇÜLEN veridir, varsayım
+ * değil. Kullanıcı yine de onaylamadan hiçbir şey taranmaz.
+ */
+app.get('/api/network/suggest', (req, res) => {
+    const networks = [];
+    const gorulen = new Set();
+
+    for (const [iface, adresler] of Object.entries(os.networkInterfaces())) {
+        for (const a of adresler || []) {
+            // Node 18+ family'yi 'IPv4' (string) verir; eski sürümlerde 4 (sayı).
+            const ipv4 = a.family === 'IPv4' || a.family === 4;
+            if (!ipv4 || a.internal || !a.cidr) continue;
+
+            const bits = parseInt(String(a.cidr).split('/')[1], 10);
+            if (!Number.isFinite(bits) || bits < 8 || bits > 32) continue;
+
+            // Ağ adresi + maske biçiminde normalleştir (a.cidr host adresini taşır).
+            const oktet = a.address.split('.').map(Number);
+            const ipNum = (oktet[0] * 16777216) + (oktet[1] * 65536) + (oktet[2] * 256) + oktet[3];
+            const maske = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+            const ag = (ipNum & maske) >>> 0;
+            const agIp = [ag >>> 24, (ag >>> 16) & 0xFF, (ag >>> 8) & 0xFF, ag & 0xFF].join('.');
+            const cidr = `${agIp}/${bits}`;
+
+            if (gorulen.has(cidr)) continue;
+            gorulen.add(cidr);
+            networks.push({ cidr, iface, address: a.address, netmask: a.netmask });
+        }
+    }
+    res.json({ networks });
+});
+
 app.post('/api/scan', requireRole('operator'), async (req, res) => {
     if (scanStatus.scanning) {
         // Gerçekten bir tarama sürüyorsa reddet; ama arka plan yenilemesi
@@ -249,14 +348,24 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
         }
     }
 
-    const start = parseInt(req.body.start) || 1;
-    const end = parseInt(req.body.end) || 254;
+    const start = parseInt(req.body.start, 10) || 1;
+    const end = parseInt(req.body.end, 10) || 254;
 
     // Serbest hedef listesi (birden çok, bitişik olmayan aralık) önceliklidir;
     // boşsa eski taban IP + maske yoluna düşülür.
+    // Tarama hedefi için varsayılan YOKTUR: burada bir zamanlar belirli bir
+    // müşteri ağı (192.168.2.18//22) sabitti ve yapılandırma yapılmamış her
+    // kurulum, kullanıcının ağıyla ilgisi olmayan 1022 adresi tarıyordu.
     const targets = (req.body.targets != null ? req.body.targets : getSetting('scan_targets')) || '';
-    const baseIp = req.body.baseIp || getSetting('scan_base_ip') || '192.168.2.18';
-    const cidr = req.body.cidr || getSetting('scan_cidr') || '22';
+    const baseIp = req.body.baseIp || getSetting('scan_base_ip') || '';
+    const cidr = req.body.cidr || getSetting('scan_cidr') || '24';
+
+    if (!String(targets).trim() && !String(baseIp).trim()) {
+        const mesaj = 'Tarama hedefi tanımlı değil — Ayarlar > Ağ Tarama bölümünden '
+            + 'yazıcılarınızın bulunduğu ağı girin.';
+        scanStatus = { scanning: false, progress: 0, total: 0, scanned: 0, found: 0, message: mesaj };
+        return res.status(400).json({ error: mesaj });
+    }
 
     const subnets = String(targets).trim()
         ? parseScanTargets(targets)
@@ -309,18 +418,14 @@ app.post('/api/scan', requireRole('operator'), async (req, res) => {
         const queried = await mapConcurrent(hosts, 6, async (host) => {
             scanStatus.message = `SNMP sorgulanıyor: ${host.ip}`;
             try {
-                const info = await queryPrinter(host.ip, snmpOpts);
+                const info = await queryPrinter(host.ip, snmpOpts, queryOpts());
                 info.openPorts = host.ports;
                 info.snmpOpen = host.snmpOpen;
                 return info;
             } catch (e) {
                 return {
-                    ip: host.ip, name: `Yazıcı (${host.ip})`,
-                    model: 'SNMP Yanıt Yok', type: 'laser', color: false, mac: '',
-                    location: 'Bilinmiyor', status: 'online', statusText: 'Çevrim İçi',
-                    serialNumber: '', firmware: '', toner: { black: -1 }, paperTrays: [],
-                    queue: [], totalPrinted: 0, monthlyPrinted: 0, lastSeen: 'Şimdi',
-                    snmpAvailable: false, printerMib: false,
+                    ...unqueriedPrinter(host.ip),
+                    status: 'online', statusText: 'Çevrim İçi', lastSeen: 'Şimdi',
                     openPorts: host.ports, snmpOpen: host.snmpOpen
                 };
             }
@@ -401,19 +506,16 @@ function saveKnownPrinters() {
 
 function loadKnownPrinters() {
     const rows = db.prepare('SELECT * FROM known_printers ORDER BY printer_ip').all();
+    // Yalnızca DB'de GERÇEKTEN kayıtlı alanlar doldurulur; gerisi arka plan
+    // yenilemesi cevap verene kadar "bilinmiyor" kalır (bkz. unqueriedPrinter).
     return rows.map((r, i) => ({
+        ...unqueriedPrinter(r.printer_ip),
         id: i + 1,
-        ip: r.printer_ip,
         name: r.name || `Yazıcı (${r.printer_ip})`,
         model: r.model || '',
-        type: 'laser', color: false,
         mac: r.mac || '',
-        location: 'Bilinmiyor',
-        status: 'offline', statusText: 'Sorgulanıyor...',
-        serialNumber: r.serial_number || '', firmware: '',
-        toner: { black: -1 }, paperTrays: [], queue: [],
-        totalPrinted: 0, monthlyPrinted: 0,
-        lastSeen: r.last_seen, snmpAvailable: false,
+        serialNumber: r.serial_number || '',
+        lastSeen: r.last_seen,
         firstSeen: r.first_seen || r.last_seen || '',
         // last_online yoksa (bu kolondan önceki kurulumlar) last_seen'e düş —
         // aksi halde budama tüm eski kayıtları bir anda silerdi.
@@ -445,7 +547,7 @@ async function refreshAllPrinters() {
         // yanlış slota yazıp kopya IP üretiyordu — her seferinde IP'den bul.
         const at = () => discoveredPrinters.findIndex(x => x.ip === p.ip);
         try {
-            const info = await queryPrinter(p.ip, snmpCommunity());
+            const info = await queryPrinter(p.ip, snmpCommunity(), queryOpts());
             const i = at();
             if (i >= 0) {
                 // queryPrinter, SNMP tamamen sessiz kalsa da hata fırlatmaz —
@@ -495,7 +597,7 @@ async function refreshAllPrinters() {
     });
 
         readings.recordAll(discoveredPrinters); // ISO A.8.16 — zaman serisi
-        readings.pruneReadings(parseInt(getSetting('readings_retention_days')) || 90); // saklama politikası
+        readings.pruneReadings(parseInt(getSetting('readings_retention_days'), 10) || 90); // saklama politikası
         saveKnownPrinters();
     } finally {
         // refreshing EN SON temizlenir: /api/scan bunun düşmesini bekliyor,
@@ -526,7 +628,7 @@ function scheduleAutoRefresh() {
         clearInterval(autoRefreshTimer);
         autoRefreshTimer = null;
     }
-    const minutes = parseInt(getSetting('auto_refresh_minutes')) || 0;
+    const minutes = parseInt(getSetting('auto_refresh_minutes'), 10) || 0;
     if (minutes <= 0) return;
 
     autoRefreshTimer = setInterval(async () => {
@@ -566,28 +668,28 @@ app.post('/api/toner-types', requireRole('operator'), (req, res) => {
     if (!name) return res.status(400).json({ error: 'Toner adı zorunlu.' });
     const info = db.prepare(`INSERT INTO toner_types (name, color, printer_model, yield_pages, unit_cost, currency, min_stock)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-        name, color || 'black', printer_model || '', parseInt(yield_pages) || 0,
-        parseFloat(unit_cost) || 0, currency || getSetting('currency') || 'TRY', parseInt(min_stock) || 2);
+        name, color || 'black', printer_model || '', parseInt(yield_pages, 10) || 0,
+        parseFloat(unit_cost) || 0, currency || getSetting('currency') || 'TRY', parseInt(min_stock, 10) || 2);
     audit({ actor: currentUser(req).username, action: 'create', entity: 'toner_type', entity_id: info.lastInsertRowid, detail: name, ip: clientIp(req) });
     res.json({ id: info.lastInsertRowid });
 });
 
-app.put('/api/toner-types/:id', requireRole('operator'), (req, res) => {
-    const id = parseInt(req.params.id);
+app.put('/api/toner-types/:id', requireRole('operator'), requireIdParam, (req, res) => {
+    const id = parseInt(req.params.id, 10);
     const cur = db.prepare('SELECT * FROM toner_types WHERE id = ?').get(id);
     if (!cur) return res.status(404).json({ error: 'Toner türü bulunamadı.' });
     const b = req.body || {};
     db.prepare(`UPDATE toner_types SET name=?, color=?, printer_model=?, yield_pages=?, unit_cost=?, currency=?, min_stock=? WHERE id=?`).run(
         b.name ?? cur.name, b.color ?? cur.color, b.printer_model ?? cur.printer_model,
-        b.yield_pages != null ? parseInt(b.yield_pages) : cur.yield_pages,
+        b.yield_pages != null ? parseInt(b.yield_pages, 10) : cur.yield_pages,
         b.unit_cost != null ? parseFloat(b.unit_cost) : cur.unit_cost,
-        b.currency ?? cur.currency, b.min_stock != null ? parseInt(b.min_stock) : cur.min_stock, id);
+        b.currency ?? cur.currency, b.min_stock != null ? parseInt(b.min_stock, 10) : cur.min_stock, id);
     audit({ actor: currentUser(req).username, action: 'update', entity: 'toner_type', entity_id: id, ip: clientIp(req) });
     res.json({ ok: true });
 });
 
-app.delete('/api/toner-types/:id', requireRole('operator'), (req, res) => {
-    const id = parseInt(req.params.id);
+app.delete('/api/toner-types/:id', requireRole('operator'), requireIdParam, (req, res) => {
+    const id = parseInt(req.params.id, 10);
     db.prepare('DELETE FROM toner_types WHERE id = ?').run(id);
     audit({ actor: currentUser(req).username, action: 'delete', entity: 'toner_type', entity_id: id, ip: clientIp(req) });
     res.json({ ok: true });
@@ -622,8 +724,9 @@ app.get('/api/stock/movements', (req, res) => {
 });
 
 app.post('/api/stock/movements', requireRole('operator'), (req, res) => {
-    const { toner_type_id, direction, quantity, unit_cost, printer_ip, note, movement_date } = req.body || {};
-    const qty = parseInt(quantity);
+    const { toner_type_id, direction, quantity, unit_cost, printer_ip, note,
+            movement_date, supplier, recipient } = req.body || {};
+    const qty = parseInt(quantity, 10);
     if (!toner_type_id || !['in', 'out'].includes(direction) || !qty || qty <= 0) {
         return res.status(400).json({ error: 'Geçersiz stok hareketi.' });
     }
@@ -635,12 +738,17 @@ app.post('/api/stock/movements', requireRole('operator'), (req, res) => {
         ? movement_date
         : new Date().toISOString().slice(0, 10);
 
+    // supplier (tedarikçi) ve recipient (teslim alan) GERÇEK alanlardır ve boş
+    // kalabilir. Excel dışa aktarımı bunları eskiden nottan / actor'dan
+    // türetiyordu; actor işlemi giren operatördür, tonerı teslim alan kişi değil.
     const actor = currentUser(req).username;
-    const info = db.prepare(`INSERT INTO stock_movements (toner_type_id, direction, quantity, unit_cost, printer_ip, note, actor, movement_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    const info = db.prepare(`INSERT INTO stock_movements
+        (toner_type_id, direction, quantity, unit_cost, printer_ip, note, actor, movement_date, supplier, recipient)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         toner_type_id, direction, qty,
         unit_cost != null ? parseFloat(unit_cost) : type.unit_cost,
-        printer_ip || null, note || '', actor, mDate);
+        printer_ip || null, note || '', actor, mDate,
+        String(supplier || '').trim(), String(recipient || '').trim());
     audit({ actor, action: direction === 'in' ? 'stock_in' : 'stock_out', entity: 'stock', entity_id: info.lastInsertRowid, detail: `${type.name} x${qty}`, ip: clientIp(req) });
     res.json({ id: info.lastInsertRowid });
 });
@@ -741,18 +849,6 @@ app.get('/api/ad/groups', async (req, res) => {
 app.get('/api/ad/user/:sam', async (req, res) => {
     try {
         const user = await ad.getUserDetail(req.params.sam);
-        // "Genel kullanılan şeyler" — kullanıcının kuyruktaki işleriyle eşleşen yazıcılar
-        const needle = (req.params.sam || '').toLowerCase();
-        const displayLc = (user.displayName || '').toLowerCase();
-        const usedPrinters = [];
-        for (const p of discoveredPrinters) {
-            const jobs = (p.queue || []).filter(q => {
-                const u = (q.user || '').toLowerCase();
-                return u.includes(needle) || (displayLc && u.includes(displayLc));
-            });
-            if (jobs.length) usedPrinters.push({ ip: p.ip, name: p.name, jobs: jobs.length });
-        }
-        user.usedResources = { printers: usedPrinters };
         // Kişi IT envanteri — kayıtlı cihazlar + yazılımlar
         user.devices = inventory.getDevicesForUser(user.sam);
         // KVKK / ISO A.5.18 — kişisel veri görüntüleme izi
@@ -814,9 +910,9 @@ app.post('/api/inventory/device', requireRole('operator'), (req, res) => {
     }
 });
 
-app.put('/api/inventory/device/:id', requireRole('operator'), (req, res) => {
+app.put('/api/inventory/device/:id', requireRole('operator'), requireIdParam, (req, res) => {
     try {
-        inventory.updateDevice(parseInt(req.params.id), req.body || {});
+        inventory.updateDevice(parseInt(req.params.id, 10), req.body || {});
         audit({ actor: currentUser(req).username, action: 'update', entity: 'device', entity_id: req.params.id, ip: clientIp(req) });
         res.json({ ok: true });
     } catch (e) {
@@ -824,9 +920,9 @@ app.put('/api/inventory/device/:id', requireRole('operator'), (req, res) => {
     }
 });
 
-app.delete('/api/inventory/device/:id', requireRole('operator'), (req, res) => {
+app.delete('/api/inventory/device/:id', requireRole('operator'), requireIdParam, (req, res) => {
     try {
-        inventory.deleteDevice(parseInt(req.params.id));
+        inventory.deleteDevice(parseInt(req.params.id, 10));
         audit({ actor: currentUser(req).username, action: 'delete', entity: 'device', entity_id: req.params.id, ip: clientIp(req) });
         res.json({ ok: true });
     } catch (e) {
@@ -837,18 +933,12 @@ app.delete('/api/inventory/device/:id', requireRole('operator'), (req, res) => {
 // ============================================
 // KULLANICI ERİŞİM RAPORU (ISO A.5.18 gözden geçirme kanıtı)
 // Kişinin tüm erişim profili tek yanıtta: gruplar, klasörler,
-// uygulamalar, cihazlar, kullandığı yazıcılar.
+// uygulamalar, cihazlar.
 // ============================================
 app.get('/api/report/user-access/:sam', async (req, res) => {
     try {
         const user = await ad.getUserDetail(req.params.sam);
         const devices = inventory.getDevicesForUser(user.sam);
-        const usedPrinters = [];
-        for (const p of discoveredPrinters) {
-            const jobs = (p.queue || []).filter(q =>
-                (q.user || '').toLowerCase().includes((req.params.sam || '').toLowerCase()));
-            if (jobs.length) usedPrinters.push({ ip: p.ip, name: p.name, jobs: jobs.length });
-        }
         audit({ actor: currentUser(req).username, action: 'access_report', entity: 'ad_user', entity_id: user.sam, ip: clientIp(req) });
         res.json({
             generatedAt: new Date().toISOString(),
@@ -861,8 +951,7 @@ app.get('/api/report/user-access/:sam', async (req, res) => {
             directGroups: user.directGroups || [],
             folderPermissions: user.folderPermissions || {},
             appAccess: user.appAccess || [],
-            devices,
-            usedPrinters
+            devices
         });
     } catch (e) {
         safeError(res, e, 'Erişim raporu oluşturulamadı.');
@@ -907,7 +996,7 @@ app.post('/api/settings', requireRole('admin'), (req, res) => {
 });
 
 app.get('/api/audit', requireRole('admin'), (req, res) => {
-    const limit = Math.min(parseInt(req.query.limit) || 200, 1000);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
     const rows = db.prepare('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?').all(limit);
     res.json({ audit: rows });
 });

@@ -82,7 +82,7 @@ function mergeScanResults(previous, results, onIpChange, nowIso = new Date().toI
         merged.push({
             ...p, status: 'offline', statusText: 'Çevrim Dışı',
             lastSeen: p.lastSeen === 'Şimdi' ? nowIso : p.lastSeen,
-            snmpAvailable: false, queue: []
+            snmpAvailable: false
         });
     }
 

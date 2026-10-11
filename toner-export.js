@@ -40,16 +40,20 @@ function todaySerial() {
 // VERİ TOPLAMA
 // ============================================
 
-// Toner çıkışları = orijinal dosyadaki "toner değişimi" kayıtları.
-// Departman/Alan Kişi uygulamada ayrı alan olarak tutulmadığı için
-// yazıcı varlık kaydından (özel konum / SNMP konumu / yazıcı adı) ve
-// hareketi yapan kullanıcıdan türetilir.
+// Toner çıkışları = "toner değişimi" kayıtları.
+//
+// Departman ve "Alan Kişi" artık TÜRETİLMEZ, kaydedilir. Eskiden departman
+// zinciri m.printer_ip ile bitiyordu (Departman sütununda IP adresi çıkıyordu)
+// ve "Alan Kişi" boşsa m.actor'a düşüyordu — yani tonerı teslim alan kişi
+// yerine hareketi giren operatörün uygulama kullanıcı adı yazılıyordu.
+// Bilinmeyen alan artık boş kalır; IT personeli o hücreye bakıp yanlış bir
+// isme/lokasyona güvenmez.
 function fetchDegisimRows() {
     return db.prepare(`
         SELECT
             COALESCE(m.movement_date, date(m.created_at)) AS tarih,
-            COALESCE(NULLIF(a.custom_location, ''), NULLIF(k.name, ''), m.printer_ip, '') AS departman,
-            COALESCE(NULLIF(m.note, ''), NULLIF(m.actor, ''), '') AS alan_kisi,
+            COALESCE(NULLIF(a.custom_location, ''), NULLIF(k.name, ''), '') AS departman,
+            COALESCE(NULLIF(m.recipient, ''), '') AS alan_kisi,
             t.name AS toner_tipi,
             m.quantity AS adet
         FROM stock_movements m
@@ -61,12 +65,15 @@ function fetchDegisimRows() {
     `).all();
 }
 
-// Stok girişleri — orijinaldeki StokGirisCikis sayfası (TONER MODELİ / FİRMA / ADET)
+// Stok girişleri — StokGirisCikis sayfası (TONER MODELİ / FİRMA / ADET).
+// FİRMA alanı gerçek tedarikçi sütunundan gelir. Eskiden hareket notuna,
+// o da boşsa 'STOK GİRİŞİ' sabitine düşüyordu; uygulama tedarikçi bilgisi
+// hiç toplamadığı için sütun tamamen uydurmaydı.
 function fetchGirisRows() {
     return db.prepare(`
         SELECT
             t.name AS toner_modeli,
-            COALESCE(NULLIF(m.note, ''), 'STOK GİRİŞİ') AS firma,
+            COALESCE(NULLIF(m.supplier, ''), '') AS firma,
             m.quantity AS adet,
             COALESCE(m.movement_date, date(m.created_at)) AS tarih
         FROM stock_movements m
@@ -156,11 +163,18 @@ function buildStokDurum(summary, degisimRows) {
     for (const t of summary) {
         const st = stats.get(t.name);
         const count = st ? st.count : 0;
-        const devirHizi = (st && count > 0) ? (st.max - st.min) / count : 0;
         const mevcut = t.stok_giris - t.stok_cikis;
         const gecenGun = st ? today - st.max : '';
-        const hOran = count > 0 ? devirHizi / count : 0;
-        const siparis = (st && mevcut * devirHizi < (today - st.max)) ? 'SİPARİŞ' : '';
+
+        // Devir hızı (kullanım başına geçen gün) iki AYRI tarihli hareket
+        // gerektirir: tek kayıtta st.max === st.min olur, hız 0 çıkar ve
+        // "0 < geçen gün" her zaman doğru olduğu için her toner için SİPARİŞ
+        // basılırdı. Yeterli veri yoksa hücreler boş bırakılır — tek bir
+        // gözlemden devir hızı çıkarmak uydurmadır.
+        const yeterliVeri = !!st && count > 0 && st.max > st.min;
+        const devirHizi = yeterliVeri ? (st.max - st.min) / count : '';
+        const hOran = yeterliVeri ? devirHizi / count : '';
+        const siparis = (yeterliVeri && mevcut * devirHizi < (today - st.max)) ? 'SİPARİŞ' : '';
 
         aoa.push([t.name, t.stok_giris, t.stok_cikis, mevcut, devirHizi, count,
             '', hOran, '', gecenGun, '', siparis, '']);
@@ -196,11 +210,21 @@ function buildStokGirisCikis(girisRows) {
 // ============================================
 // Orijinal düzen: 1. satır boş, A2/B2 başlık, 3. satırda marka sütunları,
 // 4. satırdan itibaren toner → ilgili marka sütununda yazıcı modelleri.
-const BRAND_COLUMNS = ['HP', 'CANON', 'SAMSUNG', 'BROTHER'];
+// Son sütun 'DİĞER' bir marka değil, "tanınmadı" kovasıdır.
+// Eskiden eşleşmeyen HER model ilk sütuna (HP) yazılıyordu: Konica Minolta,
+// Kyocera, Ricoh, Xerox, Lexmark, Epson — hepsi müşteriye "HP uyumlu" diye
+// gidiyordu. Bu, IT personelinin sipariş verirken güveneceği bir belgede
+// uydurulmuş uyumluluk verisiydi. Model metni gerçek markayı zaten taşıdığı
+// için DİĞER sütunundaki hücre doğru bilgi verir, yalnızca yanlış markanın
+// altında durmaz.
+const BRAND_COLUMNS = ['HP', 'CANON', 'SAMSUNG', 'BROTHER', 'DİĞER'];
+const OTHER_BRAND_INDEX = BRAND_COLUMNS.length - 1;
 
+// Yalnızca gerçek marka sütunları eşleştirmede taranır ('DİĞER' hariç).
+// Marka adının model metninde geçmesi tek kanıttır; tahmin yapılmaz.
 function detectBrandIndex(text) {
     const up = String(text || '').toUpperCase();
-    for (let i = 0; i < BRAND_COLUMNS.length; i++) {
+    for (let i = 0; i < OTHER_BRAND_INDEX; i++) {
         if (up.includes(BRAND_COLUMNS[i])) return i;
     }
     return -1;
@@ -215,18 +239,19 @@ function buildUyumluluk(summary) {
 
     for (const t of summary) {
         if (!t.printer_model) continue;
-        const row = ['', '', '', '', ''];
+        const row = new Array(1 + BRAND_COLUMNS.length).fill('');
         row[0] = t.name;
-        // Marka önce yazıcı modelinden, bulunamazsa toner adından çıkarılır
+        // Marka önce yazıcı modelinden, bulunamazsa toner adından çıkarılır.
+        // Hiçbiri tutmuyorsa TAHMİN EDİLMEZ — 'DİĞER' sütununa yazılır.
         let bi = detectBrandIndex(t.printer_model);
         if (bi < 0) bi = detectBrandIndex(t.name);
-        if (bi < 0) bi = 0; // eşleşme yoksa ilk sütuna yaz
+        if (bi < 0) bi = OTHER_BRAND_INDEX;
         row[bi + 1] = t.printer_model;
         aoa.push(row);
     }
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{ wch: 34 }, { wch: 26 }, { wch: 26 }, { wch: 26 }, { wch: 34 }];
+    ws['!cols'] = [{ wch: 34 }, { wch: 26 }, { wch: 26 }, { wch: 26 }, { wch: 26 }, { wch: 34 }];
     return ws;
 }
 
